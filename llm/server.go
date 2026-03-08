@@ -688,7 +688,6 @@ func (s *llamaServer) Load(ctx context.Context, systemInfo ml.SystemInfo, system
 	if (runtime.GOOS == "windows" && len(gpus) > 0 && gpus[0].Library == "CUDA" && s.options.UseMMap == nil) ||
 		(runtime.GOOS == "linux" && systemInfo.FreeMemory < totalSize && s.options.UseMMap == nil) ||
 		(len(gpus) == 0 && s.options.UseMMap == nil) ||
-		(len(gpus) > 0 && gpus[0].Library == "Vulkan" && s.options.UseMMap == nil) ||
 		(s.options.UseMMap != nil && !*s.options.UseMMap) {
 		s.loadRequest.UseMmap = false
 	}
@@ -1518,7 +1517,6 @@ type CompletionResponse struct {
 	PromptEvalDuration time.Duration `json:"prompt_eval_duration"`
 	EvalCount          int           `json:"eval_count"`
 	EvalDuration       time.Duration `json:"eval_duration"`
-	PeakMemory         uint64        `json:"peak_memory,omitempty"`
 
 	// Logprobs contains log probability information if requested
 	Logprobs []Logprob `json:"logprobs,omitempty"`

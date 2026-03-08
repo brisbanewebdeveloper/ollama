@@ -186,11 +186,13 @@ type completionRequest struct {
 }
 
 type completionOpts struct {
-	Temperature float32 `json:"temperature,omitempty"`
-	TopP        float32 `json:"top_p,omitempty"`
-	MinP        float32 `json:"min_p,omitempty"`
-	TopK        int     `json:"top_k,omitempty"`
-	NumPredict  int     `json:"num_predict,omitempty"`
+	Temperature     float32 `json:"temperature,omitempty"`
+	TopP            float32 `json:"top_p,omitempty"`
+	MinP            float32 `json:"min_p,omitempty"`
+	TopK            int     `json:"top_k,omitempty"`
+	RepeatLastN     int     `json:"repeat_last_n,omitempty"`
+	PresencePenalty float32 `json:"presence_penalty,omitempty"`
+	NumPredict      int     `json:"num_predict,omitempty"`
 }
 
 type CompletionResponse struct {
@@ -202,7 +204,6 @@ type CompletionResponse struct {
 	PromptEvalDuration time.Duration
 	EvalCount          int
 	EvalDuration       time.Duration
-	PeakMemory         uint64
 
 	Error *api.StatusError
 }
@@ -233,11 +234,13 @@ func (c *Client) Completion(ctx context.Context, req llm.CompletionRequest, fn f
 	}
 	if req.Options != nil {
 		creq.Options = &completionOpts{
-			Temperature: req.Options.Temperature,
-			TopP:        req.Options.TopP,
-			MinP:        req.Options.MinP,
-			TopK:        req.Options.TopK,
-			NumPredict:  req.Options.NumPredict,
+			Temperature:     req.Options.Temperature,
+			TopP:            req.Options.TopP,
+			MinP:            req.Options.MinP,
+			TopK:            req.Options.TopK,
+			RepeatLastN:     req.Options.RepeatLastN,
+			PresencePenalty: req.Options.PresencePenalty,
+			NumPredict:      req.Options.NumPredict,
 		}
 	}
 
@@ -284,7 +287,6 @@ func (c *Client) Completion(ctx context.Context, req llm.CompletionRequest, fn f
 			PromptEvalDuration: raw.PromptEvalDuration,
 			EvalCount:          raw.EvalCount,
 			EvalDuration:       raw.EvalDuration,
-			PeakMemory:         raw.PeakMemory,
 		}
 
 		fn(cresp)
