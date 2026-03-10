@@ -18,4 +18,3 @@ llama/vendor
 .copilot
 .history
 copilot-docs
-z_build_DOCKER_qwen35.sh
