@@ -1,5 +1,13 @@
 # Updates
 
+## How to build the Docker image for the `custom` branch
+
+This creates a Docker image tagged `ollama/ollama:custom` using `Dockerfile.custom`, which skips the MLX build stage while keeping the standard CPU, CUDA, and Vulkan runtime artifacts:
+
+```
+make
+```
+
 ## 2026-03-21
 
 - Branch: `custom`
@@ -13,6 +21,8 @@
 - Added tests covering API parameter parsing, Modelfile creation, create and show behavior, and chat default precedence
 - Updated the thinking and Modelfile documentation to describe model-level `think` defaults
 - Added a root `Makefile` with a Docker image build target for `ollama/ollama:custom`
+- Added `Dockerfile.custom` and updated the root `Makefile` to use it by default so branch-local Docker builds skip the MLX stage
+- Updated the root `Makefile` so the default `make` command prints `It is going to take about 20 minutes` before starting the Docker build
 
 ### Affected Files
 
@@ -26,6 +36,7 @@
 - `docs/modelfile.mdx`
 - `docs/capabilities/thinking.mdx`
 - `Makefile`
+- `Dockerfile.custom`
 
 ### Links
 
