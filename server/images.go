@@ -66,9 +66,25 @@ type Model struct {
 	License        []string
 	Digest         string
 	Options        map[string]any
+	Think          *api.ThinkValue
 	Messages       []api.Message
 
 	Template *template.Template
+}
+
+func thinkValueLiteral(think *api.ThinkValue) string {
+	if think == nil || think.Value == nil {
+		return ""
+	}
+
+	switch value := think.Value.(type) {
+	case bool:
+		return strconv.FormatBool(value)
+	case string:
+		return value
+	default:
+		return fmt.Sprintf("%v", value)
+	}
 }
 
 func (m *Model) IsMLX() bool {
@@ -255,6 +271,13 @@ func (m *Model) String() string {
 		}
 	}
 
+	if m.Think != nil {
+		modelfile.Commands = append(modelfile.Commands, parser.Command{
+			Name: "think",
+			Args: thinkValueLiteral(m.Think),
+		})
+	}
+
 	for _, license := range m.License {
 		modelfile.Commands = append(modelfile.Commands, parser.Command{
 			Name: "license",
@@ -349,6 +372,15 @@ func GetModel(name string) (*Model, error) {
 			// parse model options parameters into a map so that we can see which fields have been specified explicitly
 			if err = json.NewDecoder(params).Decode(&m.Options); err != nil {
 				return nil, err
+			}
+
+			m.Think, err = api.ThinkValueFromAny(m.Options["think"])
+			if err != nil {
+				return nil, err
+			}
+			delete(m.Options, "think")
+			if len(m.Options) == 0 {
+				m.Options = nil
 			}
 		case "application/vnd.ollama.image.messages":
 			msgs, err := os.Open(filename)

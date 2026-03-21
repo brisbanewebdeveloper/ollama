@@ -1085,6 +1085,44 @@ type ThinkValue struct {
 	Value interface{}
 }
 
+// ParseThinkValue parses a string representation of a think value.
+func ParseThinkValue(value string) (*ThinkValue, error) {
+	value = strings.TrimSpace(value)
+
+	switch value {
+	case "true":
+		return &ThinkValue{Value: true}, nil
+	case "false":
+		return &ThinkValue{Value: false}, nil
+	case "high", "medium", "low":
+		return &ThinkValue{Value: value}, nil
+	default:
+		return nil, fmt.Errorf("invalid think value: %q (must be \"high\", \"medium\", \"low\", true, or false)", value)
+	}
+}
+
+// ThinkValueFromAny converts a bool-or-string value into a ThinkValue.
+func ThinkValueFromAny(value any) (*ThinkValue, error) {
+	switch v := value.(type) {
+	case nil:
+		return nil, nil
+	case bool:
+		return &ThinkValue{Value: v}, nil
+	case string:
+		return ParseThinkValue(v)
+	case *ThinkValue:
+		if v == nil || v.Value == nil {
+			return nil, nil
+		}
+		if !v.IsValid() {
+			return nil, fmt.Errorf("think must be a boolean or string (\"high\", \"medium\", \"low\", true, or false)")
+		}
+		return &ThinkValue{Value: v.Value}, nil
+	default:
+		return nil, fmt.Errorf("think must be a boolean or string (\"high\", \"medium\", \"low\", true, or false)")
+	}
+}
+
 // IsValid checks if the ThinkValue is valid
 func (t *ThinkValue) IsValid() bool {
 	if t == nil || t.Value == nil {
@@ -1245,6 +1283,16 @@ func FormatParams(params map[string][]string) (map[string]any, error) {
 	out := make(map[string]any)
 	// iterate params and set values based on json struct tags
 	for key, vals := range params {
+		if key == "think" {
+			thinkValue, err := ParseThinkValue(vals[0])
+			if err != nil {
+				return nil, err
+			}
+
+			out[key] = thinkValue.Value
+			continue
+		}
+
 		if opt, ok := jsonOpts[key]; !ok {
 			return nil, fmt.Errorf("unknown parameter '%s'", key)
 		} else {

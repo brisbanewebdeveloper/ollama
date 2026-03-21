@@ -232,6 +232,57 @@ func TestUseMmapFormatParams(t *testing.T) {
 	}
 }
 
+func TestThinkFormatParams(t *testing.T) {
+	tests := []struct {
+		name string
+		req  map[string][]string
+		exp  any
+		err  string
+	}{
+		{
+			name: "true",
+			req: map[string][]string{
+				"think": {"true"},
+			},
+			exp: true,
+		},
+		{
+			name: "false",
+			req: map[string][]string{
+				"think": {"false"},
+			},
+			exp: false,
+		},
+		{
+			name: "level",
+			req: map[string][]string{
+				"think": {"high"},
+			},
+			exp: "high",
+		},
+		{
+			name: "invalid",
+			req: map[string][]string{
+				"think": {"invalid"},
+			},
+			err: `invalid think value: "invalid" (must be "high", "medium", "low", true, or false)`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resp, err := FormatParams(test.req)
+			if test.err != "" {
+				require.EqualError(t, err, test.err)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, test.exp, resp["think"])
+		})
+	}
+}
+
 func TestMessage_UnmarshalJSON(t *testing.T) {
 	tests := []struct {
 		input    string

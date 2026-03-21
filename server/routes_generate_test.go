@@ -2108,6 +2108,113 @@ func TestChatWithPromptEndingInThinkTag(t *testing.T) {
 	})
 }
 
+func TestChatUsesModelThinkDefaultWhenRequestUnset(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	mock := &mockRunner{
+		CompletionResponse: llm.CompletionResponse{
+			Content:            "done",
+			Done:               true,
+			DoneReason:         llm.DoneReasonStop,
+			PromptEvalCount:    1,
+			PromptEvalDuration: 1,
+			EvalCount:          1,
+			EvalDuration:       1,
+		},
+	}
+
+	s := &Server{
+		sched: &Scheduler{
+			pendingReqCh:    make(chan *LlmRequest, 1),
+			finishedReqCh:   make(chan *LlmRequest, 1),
+			expiredCh:       make(chan *runnerRef, 1),
+			unloadedCh:      make(chan any, 1),
+			loaded:          make(map[string]*runnerRef),
+			newServerFn:     newMockServer(mock),
+			getGpuFn:        getGpuFn,
+			getSystemInfoFn: getSystemInfoFn,
+			waitForRecovery: 250 * time.Millisecond,
+			loadFn: func(req *LlmRequest, _ *ggml.GGML, _ ml.SystemInfo, _ []ml.DeviceInfo, _ bool) bool {
+				time.Sleep(time.Millisecond)
+				req.successCh <- &runnerRef{llama: mock}
+				return false
+			},
+		},
+	}
+
+	go s.sched.Run(t.Context())
+
+	_, digest := createBinFile(t, ggml.KV{
+		"general.architecture":          "llama",
+		"llama.block_count":             uint32(1),
+		"llama.context_length":          uint32(8192),
+		"llama.embedding_length":        uint32(4096),
+		"llama.attention.head_count":    uint32(32),
+		"llama.attention.head_count_kv": uint32(8),
+		"tokenizer.ggml.tokens":         []string{""},
+		"tokenizer.ggml.scores":         []float32{0},
+		"tokenizer.ggml.token_type":     []int32{0},
+	}, []*ggml.Tensor{
+		{Name: "token_embd.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "blk.0.attn_norm.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "blk.0.ffn_down.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "blk.0.ffn_gate.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "blk.0.ffn_up.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "blk.0.ffn_norm.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "blk.0.attn_k.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "blk.0.attn_output.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "blk.0.attn_q.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "blk.0.attn_v.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "output.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+	})
+
+	w := createRequest(t, s.CreateHandler, api.CreateRequest{
+		Model: "test-thinking-default-off",
+		Files: map[string]string{"file.gguf": digest},
+		Template: `{{- range .Messages }}
+{{- if eq .Role "user" }}user: {{ .Content }}
+{{ else if eq .Role "assistant" }}assistant: {{ if .Thinking }}<think>{{ .Thinking }}</think>{{ end }}{{ .Content }}
+{{ end }}{{ end }}{{ if .Think }}<think>{{ end }}`,
+		Parameters: map[string]any{"think": false},
+		Stream:     &stream,
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	streamRequest := false
+	w = createRequest(t, s.ChatHandler, api.ChatRequest{
+		Model:    "test-thinking-default-off",
+		Messages: []api.Message{{Role: "user", Content: "Do the thing"}},
+		Stream:   &streamRequest,
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	if strings.HasSuffix(mock.CompletionRequest.Prompt, "<think>") {
+		t.Fatalf("expected model default think=false to suppress think prompt, got %q", mock.CompletionRequest.Prompt)
+	}
+
+	think := true
+	w = createRequest(t, s.ChatHandler, api.ChatRequest{
+		Model:    "test-thinking-default-off",
+		Messages: []api.Message{{Role: "user", Content: "Do the thing"}},
+		Think:    &api.ThinkValue{Value: think},
+		Stream:   &streamRequest,
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	if !strings.HasSuffix(mock.CompletionRequest.Prompt, "<think>") {
+		t.Fatalf("expected explicit request think=true to override model default, got %q", mock.CompletionRequest.Prompt)
+	}
+}
+
 func TestGenerateUnload(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

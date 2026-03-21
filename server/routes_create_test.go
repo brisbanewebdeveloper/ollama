@@ -523,6 +523,52 @@ func TestCreateMergeParameters(t *testing.T) {
 	}
 }
 
+func TestCreateShowThinkParameter(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var s Server
+
+	_, digest := createBinFile(t, nil, nil)
+	w := createRequest(t, s.CreateHandler, api.CreateRequest{
+		Name:  "test-think-default",
+		Files: map[string]string{"test.gguf": digest},
+		Parameters: map[string]any{
+			"think": false,
+		},
+		Stream: &stream,
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status code 200, actual %d", w.Code)
+	}
+
+	w = createRequest(t, s.ShowHandler, api.ShowRequest{Model: "test-think-default"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status code 200, actual %d", w.Code)
+	}
+
+	var resp api.ShowResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(resp.Modelfile, "PARAMETER think false") {
+		t.Fatalf("expected modelfile to include think default, got %q", resp.Modelfile)
+	}
+
+	var params []string
+	for _, param := range strings.Split(resp.Parameters, "\n") {
+		if strings.TrimSpace(param) == "" {
+			continue
+		}
+		params = append(params, strings.Join(strings.Fields(param), " "))
+	}
+
+	if !slices.Equal(params, []string{"think false"}) {
+		t.Fatalf("expected parameters [think false], got %v", params)
+	}
+}
+
 func TestCreateReplacesMessages(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

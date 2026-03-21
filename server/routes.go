@@ -143,6 +143,14 @@ func (s *Server) modelOptions(model *Model, requestOpts map[string]any) (api.Opt
 	return opts, nil
 }
 
+func resolveRequestThink(requestThink, modelThink *api.ThinkValue) *api.ThinkValue {
+	if requestThink != nil {
+		return requestThink
+	}
+
+	return modelThink
+}
+
 // scheduleRunner schedules a runner after validating inputs such as capabilities and model options.
 // It returns the allocated runner, model instance, and consolidated options if successful and error otherwise.
 func (s *Server) scheduleRunner(ctx context.Context, name string, caps []model.Capability, requestOpts map[string]any, keepAlive *api.Duration) (llm.LlamaServer, *Model, *api.Options, error) {
@@ -252,6 +260,8 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 		}
 		return
 	}
+
+	req.Think = resolveRequestThink(req.Think, m.Think)
 
 	if req.TopLogprobs < 0 || req.TopLogprobs > 20 {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "top_logprobs must be between 0 and 20"})
@@ -1291,6 +1301,9 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 			params = append(params, fmt.Sprintf("%-*s %#v", cs, k, v))
 		}
 	}
+	if m.Think != nil {
+		params = append(params, fmt.Sprintf("%-*s %#v", cs, "think", m.Think.Value))
+	}
 	resp.Parameters = strings.Join(params, "\n")
 
 	if len(req.Options) > 0 {
@@ -2144,6 +2157,8 @@ func (s *Server) ChatHandler(c *gin.Context) {
 		}
 		return
 	}
+
+	req.Think = resolveRequestThink(req.Think, m.Think)
 
 	if req.TopLogprobs < 0 || req.TopLogprobs > 20 {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "top_logprobs must be between 0 and 20"})

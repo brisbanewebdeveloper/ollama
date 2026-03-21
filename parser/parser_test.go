@@ -38,7 +38,7 @@ TEMPLATE """{{ if .System }}<|start_header_id|>system<|end_header_id|>
 
 {{ .Prompt }}<|eot_id|>{{ end }}<|start_header_id|>assistant<|end_header_id|>
 
-{{ .Response }}<|eot_id|>"""    
+{{ .Response }}<|eot_id|>"""
 `
 
 	reader := strings.NewReader(input)
@@ -71,7 +71,7 @@ TEMPLATE """   {{ if .System }}<|start_header_id|>system<|end_header_id|>
 
 {{ .Prompt }}<|eot_id|>{{ end }}<|start_header_id|>assistant<|end_header_id|>
 
-{{ .Response }}<|eot_id|>   """    
+{{ .Response }}<|eot_id|>   """
 `
 
 	reader := strings.NewReader(input)
@@ -734,6 +734,15 @@ MESSAGE user Hello
 				Messages: []api.Message{
 					{Role: "user", Content: "Hello"},
 				},
+			},
+		},
+		{
+			`FROM test
+PARAMETER think false
+`,
+			&api.CreateRequest{
+				From:       "test",
+				Parameters: map[string]any{"think": false},
 			},
 		},
 		{
