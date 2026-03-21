@@ -25,6 +25,7 @@ make
 - Updated the root `Makefile` so the default `make` command prints `It is going to take about 20 minutes` before starting the Docker build
 - Updated the root `Makefile` to pass a git-derived `VERSION` into the custom Docker build so `make` no longer produces an Ollama server that reports version `0.0.0`
 - Updated `Dockerfile.custom` to apply release ldflags directly from `VERSION` during `go build`, fixing the failed custom `make` build caused by invalid `GOFLAGS` handling
+- Updated `Dockerfile.custom` to normalize hash-only or `0.0.0` build versions to a semver fallback such as `0.6.4+custom.g<hash>` so `/api/version` stays compatible with VS Code integrations
 
 ### Affected Files
 

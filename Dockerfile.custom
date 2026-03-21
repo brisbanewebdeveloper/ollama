@@ -156,8 +156,15 @@ ARG CGO_CXXFLAGS
 ENV CGO_CFLAGS="${CGO_CFLAGS}"
 ENV CGO_CXXFLAGS="${CGO_CXXFLAGS}"
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    go build -trimpath -buildmode=pie \
-        -ldflags "-w -s -X=github.com/ollama/ollama/version.Version=${VERSION} -X=github.com/ollama/ollama/server.mode=release" \
+    build_version="${VERSION#v}" \
+    && case "${build_version}" in \
+        ""|"0.0.0") build_version="0.6.4+custom" ;; \
+        [0-9]*.[0-9]*.[0-9]*) ;; \
+        *) build_version="0.6.4+custom.g${build_version}" ;; \
+    esac \
+    && echo "Building Ollama version ${build_version}" \
+    && go build -trimpath -buildmode=pie \
+        -ldflags "-w -s -X=github.com/ollama/ollama/version.Version=${build_version} -X=github.com/ollama/ollama/server.mode=release" \
         -o /bin/ollama .
 
 FROM --platform=linux/amd64 scratch AS amd64
