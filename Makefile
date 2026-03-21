@@ -5,7 +5,7 @@ VERSION ?= $(shell git describe --tags --first-parent --abbrev=7 --long --dirty 
 .PHONY: build docker-build
 
 build:
-	@echo "It is going to take about 20 minutes"
+	@echo "It is going to take about 20 minutes or less"
 	@$(MAKE) docker-build
 
 docker-build:
