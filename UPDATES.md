@@ -23,8 +23,8 @@ make
 - Added a root `Makefile` with a Docker image build target for `ollama/ollama:custom`
 - Added `Dockerfile.custom` and updated the root `Makefile` to use it by default so branch-local Docker builds skip the MLX stage
 - Updated the root `Makefile` so the default `make` command prints `It is going to take about 20 minutes` before starting the Docker build
-- Updated the root `Makefile` to pass git-derived `VERSION` and release `GOFLAGS` into the custom Docker build so `make` no longer produces an Ollama server that reports version `0.0.0`
-- Updated `Dockerfile.custom` so its build stage stamps the server version from Docker build args during `go build`
+- Updated the root `Makefile` to pass a git-derived `VERSION` into the custom Docker build so `make` no longer produces an Ollama server that reports version `0.0.0`
+- Updated `Dockerfile.custom` to apply release ldflags directly from `VERSION` during `go build`, fixing the failed custom `make` build caused by invalid `GOFLAGS` handling
 
 ### Affected Files
 
