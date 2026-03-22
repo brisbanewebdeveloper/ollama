@@ -36,9 +36,9 @@ func TestShowInfo(t *testing.T) {
 		}
 
 		expect := `  Model
-    architecture    test    
-    parameters      7B      
-    quantization    FP16    
+    architecture    test
+    parameters      7B
+    quantization    FP16
 
 `
 
@@ -66,11 +66,11 @@ func TestShowInfo(t *testing.T) {
 		}
 
 		expect := `  Model
-    architecture        test    
-    parameters          7B      
-    context length      0       
-    embedding length    0       
-    quantization        FP16    
+    architecture        test
+    parameters          7B
+    context length      0
+    embedding length    0
+    quantization        FP16
 
 `
 		if diff := cmp.Diff(expect, b.String()); diff != "" {
@@ -105,26 +105,26 @@ func TestShowInfo(t *testing.T) {
 		}
 
 		expect := `  Model
-    architecture        test     
-    parameters          8B       
-    context length      1000     
-    embedding length    11434    
-    quantization        FP16     
+    architecture        test
+    parameters          8B
+    context length      1000
+    embedding length    11434
+    quantization        FP16
 
   Parameters
-    stop    up    
+    stop    up
 
   Metadata
-    general.architecture       test     
-    general.parameter_count    8e+09    
-    some.false_bool            false    
-    some.true_bool             true     
-    test.context_length        1000     
-    test.embedding_length      11434    
+    general.architecture       test
+    general.parameter_count    8e+09
+    some.false_bool            false
+    some.true_bool             true
+    test.context_length        1000
+    test.embedding_length      11434
 
   Tensors
-    blk.0.attn_k.weight    BF16    [42 3117]    
-    blk.0.attn_q.weight    FP16    [3117 42]    
+    blk.0.attn_k.weight    BF16    [42 3117]
+    blk.0.attn_q.weight    FP16    [3117 42]
 
 `
 		if diff := cmp.Diff(expect, b.String()); diff != "" {
@@ -152,17 +152,17 @@ func TestShowInfo(t *testing.T) {
 		}
 
 		expect := `  Model
-    architecture    test    
-    parameters      7B      
-    quantization    FP16    
+    architecture    test
+    parameters      7B
+    quantization    FP16
 
   Parameters
-    stop           never    
-    stop           gonna    
-    stop           give     
-    stop           you      
-    stop           up       
-    temperature    99       
+    stop           never
+    stop           gonna
+    stop           give
+    stop           you
+    stop           up
+    temperature    99
 
 `
 		if diff := cmp.Diff(expect, b.String()); diff != "" {
@@ -189,15 +189,15 @@ func TestShowInfo(t *testing.T) {
 		}
 
 		expect := `  Model
-    architecture    test    
-    parameters      7B      
-    quantization    FP16    
+    architecture    test
+    parameters      7B
+    quantization    FP16
 
   Projector
-    architecture        clip       
-    parameters          133.70M    
-    embedding length    0          
-    dimensions          0          
+    architecture        clip
+    parameters          133.70M
+    embedding length    0
+    dimensions          0
 
 `
 		if diff := cmp.Diff(expect, b.String()); diff != "" {
@@ -222,14 +222,14 @@ Weigh anchor!
 		}
 
 		expect := `  Model
-    architecture    test    
-    parameters      7B      
-    quantization    FP16    
+    architecture    test
+    parameters      7B
+    quantization    FP16
 
   System
-    You are a pirate!    
-    Ahoy, matey!         
-    ...                  
+    You are a pirate!
+    Ahoy, matey!
+    ...
 
 `
 		if diff := cmp.Diff(expect, b.String()); diff != "" {
@@ -252,13 +252,13 @@ Weigh anchor!
 		}
 
 		expect := `  Model
-    architecture    test    
-    parameters      7B      
-    quantization    FP16    
+    architecture    test
+    parameters      7B
+    quantization    FP16
 
   License
-    MIT License             
-    Copyright (c) Ollama    
+    MIT License
+    Copyright (c) Ollama
 
 `
 		if diff := cmp.Diff(expect, b.String()); diff != "" {
@@ -308,10 +308,10 @@ Weigh anchor!
 		}
 
 		expect := `  Model
-    architecture    test      
-    parameters      7B        
-    quantization    FP16      
-    requires        0.14.0    
+    architecture    test
+    parameters      7B
+    quantization    FP16
+    requires        0.14.0
 
 `
 		if diff := cmp.Diff(expect, b.String()); diff != "" {
@@ -836,6 +836,146 @@ func TestRunHandler_CloudAuthErrorOnGenerate_PrintsSigninMessage(t *testing.T) {
 
 	if !strings.Contains(out.String(), "https://ollama.com/signin") {
 		t.Fatalf("expected signin_url in output, got %q", out.String())
+	}
+}
+
+func TestRunHandler_OmitsImplicitThinkOverride(t *testing.T) {
+	reqCh := make(chan api.GenerateRequest, 1)
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/show" && r.Method == http.MethodPost:
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.ShowResponse{
+				Capabilities: []model.Capability{model.CapabilityCompletion, model.CapabilityThinking},
+			}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		case r.URL.Path == "/api/generate" && r.Method == http.MethodPost:
+			var req api.GenerateRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			reqCh <- req
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.GenerateResponse{Done: true}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	t.Setenv("OLLAMA_HOST", mockServer.URL)
+	t.Cleanup(mockServer.Close)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	cmd.Flags().String("keepalive", "", "")
+	cmd.Flags().Bool("truncate", false, "")
+	cmd.Flags().Int("dimensions", 0, "")
+	cmd.Flags().Bool("verbose", false, "")
+	cmd.Flags().Bool("insecure", false, "")
+	cmd.Flags().Bool("nowordwrap", false, "")
+	cmd.Flags().String("format", "", "")
+	cmd.Flags().String("think", "", "")
+	cmd.Flags().Bool("hidethinking", false, "")
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = oldStdout })
+
+	err := RunHandler(cmd, []string{"test-thinking-model", "hello"})
+	_ = w.Close()
+	_, _ = io.Copy(io.Discard, r)
+
+	if err != nil {
+		t.Fatalf("RunHandler returned error: %v", err)
+	}
+
+	select {
+	case req := <-reqCh:
+		if req.Think != nil {
+			t.Fatalf("expected think to be omitted when not explicitly set, got %#v", req.Think)
+		}
+	default:
+		t.Fatal("server did not receive generate request")
+	}
+}
+
+func TestRunHandler_PreservesExplicitThinkOverride(t *testing.T) {
+	reqCh := make(chan api.GenerateRequest, 1)
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/show" && r.Method == http.MethodPost:
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.ShowResponse{
+				Capabilities: []model.Capability{model.CapabilityCompletion, model.CapabilityThinking},
+			}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		case r.URL.Path == "/api/generate" && r.Method == http.MethodPost:
+			var req api.GenerateRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			reqCh <- req
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.GenerateResponse{Done: true}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	t.Setenv("OLLAMA_HOST", mockServer.URL)
+	t.Cleanup(mockServer.Close)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	cmd.Flags().String("keepalive", "", "")
+	cmd.Flags().Bool("truncate", false, "")
+	cmd.Flags().Int("dimensions", 0, "")
+	cmd.Flags().Bool("verbose", false, "")
+	cmd.Flags().Bool("insecure", false, "")
+	cmd.Flags().Bool("nowordwrap", false, "")
+	cmd.Flags().String("format", "", "")
+	cmd.Flags().String("think", "", "")
+	cmd.Flags().Bool("hidethinking", false, "")
+	if err := cmd.Flags().Set("think", "false"); err != nil {
+		t.Fatalf("failed to set think flag: %v", err)
+	}
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = oldStdout })
+
+	err := RunHandler(cmd, []string{"test-thinking-model", "hello"})
+	_ = w.Close()
+	_, _ = io.Copy(io.Discard, r)
+
+	if err != nil {
+		t.Fatalf("RunHandler returned error: %v", err)
+	}
+
+	select {
+	case req := <-reqCh:
+		if req.Think == nil {
+			t.Fatal("expected explicit think override to be sent")
+		}
+		if value, ok := req.Think.Value.(bool); !ok || value {
+			t.Fatalf("expected explicit think=false override, got %#v", req.Think)
+		}
+	default:
+		t.Fatal("server did not receive generate request")
 	}
 }
 

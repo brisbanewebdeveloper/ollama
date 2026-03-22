@@ -8,6 +8,18 @@ This creates a Docker image tagged `ollama/ollama:custom` using `Dockerfile.cust
 make
 ```
 
+## 2026-03-22
+
+### Changes
+
+- Fixed `ollama run` so it no longer auto-sends `think=true` when the user does not pass `--think`, which had been overriding model-level `PARAMETER think` defaults such as `false`
+- Added CLI regression tests covering the implicit `think` omission and the explicit `--think=false` override
+
+### Affected Files
+
+- `cmd/cmd.go`
+- `cmd/cmd_test.go`
+
 ## 2026-03-21
 
 - Branch: `custom`
