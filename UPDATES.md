@@ -8,6 +8,22 @@ This creates a Docker image tagged `ollama/ollama:custom` using `Dockerfile.cust
 make
 ```
 
+## 2026-04-01
+
+### Changes
+
+- Resolved the active merge conflict in `cmd/cmd_test.go` by keeping both the CLI `think` override regression tests and the explicit `:cloud` stub normalization tests
+- Aligned the conflicted `showInfo` min-version expectation with the current `requires` output and preserved the whitespace-normalized assertion used in that test
+
+### Verification
+
+- `go test ./cmd -run 'TestShowInfo/min version|TestRunHandler_(OmitsImplicitThinkOverride|PreservesExplicitThinkOverride|ExplicitCloudStubMissing_PullsNormalizedNameTEMP|ExplicitCloudStubPresent_SkipsPullTEMP|ExplicitCloudStubPullFailure_IsBestEffortTEMP)$'`
+
+### Affected Files
+
+- `cmd/cmd_test.go`
+- `UPDATES.md`
+
 ## 2026-03-22
 
 ### Changes
