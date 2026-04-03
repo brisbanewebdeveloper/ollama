@@ -307,9 +307,9 @@ Weigh anchor!
 		}
 
 		expect := `  Model
-    architecture    test      
-    parameters      7B        
-    quantization    FP16      
+    architecture    test
+    parameters      7B
+    quantization    FP16
     requires        0.19.0
 
 `
