@@ -15,6 +15,7 @@ __debug_bin*
 llama/build
 llama/vendor
 /ollama
+integration/testdata/models/
 # For the branch "custom"
 /.history
 /.copilot/*
