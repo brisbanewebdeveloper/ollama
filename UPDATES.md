@@ -2,11 +2,37 @@
 
 ## How to build the Docker image for the `custom` branch
 
-This creates a Docker image tagged `ollama/ollama:custom` using `Dockerfile.custom`, which skips the MLX build stage while keeping the standard CPU, CUDA, and Vulkan runtime artifacts:
+This creates a Docker image tagged `ollama/ollama:custom` using `Dockerfile.custom`.
+By default it now builds the CPU and CUDA 13 runtime only, which matches the local RTX 4090 server and avoids compiling redundant CUDA 12, Vulkan, and other runtime targets.
 
 ```
 make
 ```
+
+To override the profile:
+
+```sh
+make BUILD_PROFILE=cuda-12
+make BUILD_PROFILE=all
+```
+
+## 2026-04-08
+
+### Changes
+
+- Narrowed the custom Docker build so `make` defaults to the `runtime-cuda-13` stage instead of compiling the combined runtime image with CUDA 12, CUDA 13, and Vulkan artifacts
+- Added explicit `runtime-cuda-12`, `runtime-cuda-13`, and `runtime-all` Docker stages so `BUILD_PROFILE` can select a single CUDA runtime or the old combined build when needed
+- Chose CUDA 13 as the default profile for this custom branch after checking the local server GPU with `nvidia-smi`: RTX 4090, driver `590.48.01`, compute capability `8.9`
+
+### Verification
+
+- `nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader`
+
+### Affected Files
+
+- `Makefile`
+- `Dockerfile.custom`
+- `UPDATES.md`
 
 ## 2026-04-01
 

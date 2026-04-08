@@ -183,15 +183,51 @@ COPY --from=jetpack-6 dist/lib/ollama/ /lib/ollama/
 FROM scratch AS rocm
 COPY --from=rocm-7 dist/lib/ollama /lib/ollama
 
+FROM scratch AS archive-cuda-12
+COPY --from=cpu dist/lib/ollama /lib/ollama
+COPY --from=cuda-12 dist/lib/ollama /lib/ollama
+COPY --from=build /bin/ollama /bin/ollama
+
+FROM scratch AS archive-cuda-13
+COPY --from=cpu dist/lib/ollama /lib/ollama
+COPY --from=cuda-13 dist/lib/ollama /lib/ollama
+COPY --from=build /bin/ollama /bin/ollama
+
 FROM ${FLAVOR} AS archive
 COPY --from=cpu dist/lib/ollama /lib/ollama
 COPY --from=build /bin/ollama /bin/ollama
 
-FROM ubuntu:24.04
+FROM ubuntu:24.04 AS runtime-base
 RUN apt-get update \
     && apt-get install -y ca-certificates libvulkan1 libopenblas0 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+FROM runtime-base AS runtime-cuda-12
+COPY --from=archive-cuda-12 /bin /usr/bin
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+COPY --from=archive-cuda-12 /lib/ollama /usr/lib/ollama
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV OLLAMA_HOST=0.0.0.0:11434
+EXPOSE 11434
+ENTRYPOINT ["/bin/ollama"]
+CMD ["serve"]
+
+FROM runtime-base AS runtime-cuda-13
+COPY --from=archive-cuda-13 /bin /usr/bin
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+COPY --from=archive-cuda-13 /lib/ollama /usr/lib/ollama
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV OLLAMA_HOST=0.0.0.0:11434
+EXPOSE 11434
+ENTRYPOINT ["/bin/ollama"]
+CMD ["serve"]
+
+FROM runtime-base AS runtime-all
 COPY --from=archive /bin /usr/bin
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 COPY --from=archive /lib/ollama /usr/lib/ollama
