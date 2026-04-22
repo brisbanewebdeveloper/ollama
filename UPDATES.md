@@ -16,6 +16,23 @@ make BUILD_PROFILE=cuda-12
 make BUILD_PROFILE=all
 ```
 
+## 2026-04-22
+
+### Changes
+
+- Resolved the merge conflict in `server/routes_generate_test.go` by keeping both valid chat regressions: the model-level `think` default precedence test and the `gemma4` structured-output `think=false` format test
+- Updated the merged test harness to use the current scheduler `loadFn` mock signature instead of the stale conflicted variant
+
+### Verification
+
+- `go test ./server -run 'TestChatUsesModelThinkDefaultWhenRequestUnset|TestChatFormatWithThinkFalse'`
+- `go test ./server`
+
+### Affected Files
+
+- `server/routes_generate_test.go`
+- `UPDATES.md`
+
 ## 2026-04-08
 
 ### Changes
