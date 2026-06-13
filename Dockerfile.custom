@@ -114,6 +114,7 @@ COPY llama/server llama/server
 COPY llama/compat llama/compat
 RUN --mount=type=cache,target=/root/.ccache \
     cmake -S llama/server --preset llama_cuda_v13_linux \
+        "-DCMAKE_CUDA_ARCHITECTURES=75-virtual;80-virtual;86-virtual;89-virtual;90-virtual;90a-virtual;100-virtual;103-virtual;110-virtual" \
         && cmake --build build/llama-server-cuda_v13 -- -l $(nproc) \
         && cmake --install build/llama-server-cuda_v13 --component llama-server --strip
 
