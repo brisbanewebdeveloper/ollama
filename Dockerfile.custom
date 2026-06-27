@@ -51,7 +51,7 @@ RUN dnf install -y cuda-toolkit-${CUDA12VERSION//./-}
 ENV PATH=/usr/local/cuda-12/bin:$PATH
 
 FROM base AS cuda-13-deps
-ARG CUDA13VERSION=13.3
+ARG CUDA13VERSION=13.0
 RUN dnf install -y cuda-toolkit-${CUDA13VERSION//./-}
 ENV PATH=/usr/local/cuda-13/bin:$PATH
 
@@ -114,7 +114,7 @@ COPY llama/server llama/server
 COPY llama/compat llama/compat
 RUN --mount=type=cache,target=/root/.ccache \
     cmake -S llama/server --preset llama_cuda_v13_linux \
-        "-DCMAKE_CUDA_ARCHITECTURES=75-virtual;80-virtual;86-virtual;89-virtual;90-virtual;90a-virtual;100-virtual;103-virtual;110-virtual;120-virtual;121-virtual" \
+        "-DCMAKE_CUDA_ARCHITECTURES=75-virtual;80-virtual;86-virtual;89-virtual;90-virtual;90a-virtual;100-virtual;103-virtual;110-virtual" \
         && cmake --build build/llama-server-cuda_v13 -- -l $(nproc) \
         && cmake --install build/llama-server-cuda_v13 --component llama-server --strip
 
