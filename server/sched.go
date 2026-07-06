@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"reflect"
 	"runtime"
@@ -78,6 +79,7 @@ type Scheduler struct {
 	newServerFn     func(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, model string, f *ggml.GGML, adapters []string, projectors []string, opts api.Options, numParallel int, config llm.LlamaServerConfig) (llm.LlamaServer, error)
 	getGpuFn        func(ctx context.Context, runners []ml.FilteredRunnerDiscovery) []ml.DeviceInfo
 	getSystemInfoFn func() ml.SystemInfo
+	preModelLoadFn  func(ctx context.Context) error
 	waitForRecovery time.Duration
 }
 
@@ -99,10 +101,44 @@ func InitScheduler(ctx context.Context) *Scheduler {
 		newServerFn:     llm.NewLlamaServer,
 		getGpuFn:        discover.GPUDevices,
 		getSystemInfoFn: discover.GetSystemInfo,
+		preModelLoadFn:  runPreModelLoadRequest,
 		waitForRecovery: 5 * time.Second,
 	}
 	sched.loadFn = sched.load
 	return sched
+}
+
+func runPreModelLoadRequest(ctx context.Context) error {
+	url := strings.TrimSpace(envconfig.PreModelLoadURL())
+	if url == "" {
+		return nil
+	}
+
+	method := strings.ToUpper(strings.TrimSpace(envconfig.PreModelLoadMethod()))
+	if method == "" {
+		method = http.MethodPost
+	}
+
+	slog.Info("running pre-model-load HTTP request", "method", method, "url", url)
+	req, err := http.NewRequestWithContext(ctx, method, url, strings.NewReader(envconfig.PreModelLoadBody()))
+	if err != nil {
+		return fmt.Errorf("pre-model-load request failed: %w", err)
+	}
+
+	if contentType := strings.TrimSpace(envconfig.PreModelLoadContentType()); contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("pre-model-load request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("pre-model-load request failed: HTTP %s", resp.Status)
+	}
+	return nil
 }
 
 // schedulerModelKey returns the scheduler map key for a model.
@@ -273,6 +309,12 @@ func (s *Scheduler) processPending(ctx context.Context) {
 					runnerToExpire = s.findRunnerToUnload()
 				} else {
 					// Either no models are loaded or below envconfig.MaxRunners
+					if err := s.runPreModelLoad(ctx); err != nil {
+						slog.Info("pre-model-load request failed", "model", pending.model.ModelPath, "error", err)
+						pending.errCh <- err
+						break
+					}
+
 					// Get a refreshed GPU list
 					var gpus []ml.DeviceInfo
 					if pending.opts.NumGPU == 0 {
@@ -368,6 +410,13 @@ func (s *Scheduler) processPending(ctx context.Context) {
 			slog.Debug("ignoring unload event with no pending requests")
 		}
 	}
+}
+
+func (s *Scheduler) runPreModelLoad(ctx context.Context) error {
+	if s.preModelLoadFn == nil {
+		return nil
+	}
+	return s.preModelLoadFn(ctx)
 }
 
 func (s *Scheduler) processCompleted(ctx context.Context) {

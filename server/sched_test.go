@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"sync"
 	"testing"
@@ -313,6 +316,115 @@ func TestSchedRequestsSameModelSameRequest(t *testing.T) {
 		require.Empty(t, b.req.errCh)
 	case err := <-b.req.errCh:
 		t.Fatal(err.Error())
+	case <-ctx.Done():
+		t.Fatal("timeout")
+	}
+}
+
+func TestSchedRunsPreModelLoadRequestBeforeRefreshingGPUInfo(t *testing.T) {
+	ctx, done := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer done()
+
+	s := InitScheduler(ctx)
+	s.waitForRecovery = 10 * time.Millisecond
+	scenario := newScenarioRequest(t, ctx, "ollama-model-1", 10, nil, nil)
+	events := make(chan string, 3)
+	s.preModelLoadFn = func(ctx context.Context) error {
+		events <- "pre-load"
+		return nil
+	}
+	s.getGpuFn = func(ctx context.Context, runners []ml.FilteredRunnerDiscovery) []ml.DeviceInfo {
+		events <- "gpu"
+		return getGpuFn(ctx, runners)
+	}
+	s.getSystemInfoFn = getSystemInfoFn
+	s.newServerFn = scenario.newServer
+
+	s.pendingReqCh <- scenario.req
+	s.Run(ctx)
+
+	select {
+	case resp := <-scenario.req.successCh:
+		require.Equal(t, scenario.srv, resp.llama)
+	case err := <-scenario.req.errCh:
+		t.Fatal(err)
+	case <-ctx.Done():
+		t.Fatal("timeout")
+	}
+
+	require.Equal(t, "pre-load", <-events)
+	require.Equal(t, "gpu", <-events)
+}
+
+func TestRunPreModelLoadRequest(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("unset", func(t *testing.T) {
+		t.Setenv("OLLAMA_PRE_MODEL_LOAD_URL", "")
+		require.NoError(t, runPreModelLoadRequest(ctx))
+	})
+
+	t.Run("http post", func(t *testing.T) {
+		var method, contentType, body string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			method = r.Method
+			contentType = r.Header.Get("Content-Type")
+			data, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			body = string(data)
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer srv.Close()
+
+		t.Setenv("OLLAMA_PRE_MODEL_LOAD_URL", srv.URL)
+		t.Setenv("OLLAMA_PRE_MODEL_LOAD_METHOD", "POST")
+		t.Setenv("OLLAMA_PRE_MODEL_LOAD_CONTENT_TYPE", "application/json")
+		t.Setenv("OLLAMA_PRE_MODEL_LOAD_BODY", `{"unload_models": true, "free_memory": true}`)
+
+		require.NoError(t, runPreModelLoadRequest(ctx))
+		require.Equal(t, http.MethodPost, method)
+		require.Equal(t, "application/json", contentType)
+		require.JSONEq(t, `{"unload_models": true, "free_memory": true}`, body)
+	})
+
+	t.Run("http failure", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "nope", http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		t.Setenv("OLLAMA_PRE_MODEL_LOAD_URL", srv.URL)
+		t.Setenv("OLLAMA_PRE_MODEL_LOAD_METHOD", "POST")
+
+		require.ErrorContains(t, runPreModelLoadRequest(ctx), "pre-model-load request failed")
+	})
+}
+
+func TestSchedPreModelLoadRequestFailureAbortsBeforeRefreshingGPUInfo(t *testing.T) {
+	ctx, done := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer done()
+
+	s := InitScheduler(ctx)
+	s.waitForRecovery = 10 * time.Millisecond
+	scenario := newScenarioRequest(t, ctx, "ollama-model-1", 10, nil, nil)
+	s.preModelLoadFn = func(ctx context.Context) error {
+		return errors.New("hook failed")
+	}
+	s.getGpuFn = func(ctx context.Context, runners []ml.FilteredRunnerDiscovery) []ml.DeviceInfo {
+		t.Fatal("GPU discovery should not run after pre-model-load failure")
+		return nil
+	}
+	s.getSystemInfoFn = getSystemInfoFn
+	s.newServerFn = scenario.newServer
+
+	s.pendingReqCh <- scenario.req
+	s.Run(ctx)
+
+	select {
+	case err := <-scenario.req.errCh:
+		require.ErrorContains(t, err, "hook failed")
+	case resp := <-scenario.req.successCh:
+		t.Fatalf("unexpected success %v", resp)
 	case <-ctx.Done():
 		t.Fatal("timeout")
 	}
