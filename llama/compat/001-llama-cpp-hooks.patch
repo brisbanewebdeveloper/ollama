@@ -2,11 +2,12 @@ diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
 index 474cabdfc..2bfe43a28 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
-@@ -4,6 +4,7 @@
+@@ -4,7 +4,8 @@
  #include "ggml.h"
  #include "gguf.h"
  #include "llama-hparams.h"
 +#include "llama-ollama-compat.h"
+ #include "llama.h"
  
  #include <algorithm>
  #include <array>

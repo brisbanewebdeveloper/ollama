@@ -1,0 +1,27 @@
+diff --git a/vendor/sheredom/subprocess.h b/vendor/sheredom/subprocess.h
+index 5e809023..ab7cca28 100644
+--- a/vendor/sheredom/subprocess.h
++++ b/vendor/sheredom/subprocess.h
+@@ -1208,6 +1208,14 @@ cleanup:
+ #if defined(__APPLE__) && MAC_OS_X_VERSION_MIN_REQUIRED >= 260000
+     posix_error = posix_spawn_file_actions_addchdir(&actions, process_cwd);
+ #else
++#if defined(__GLIBC__)
++#if __GLIBC_PREREQ(2, 29)
++    posix_error = posix_spawn_file_actions_addchdir_np(&actions, process_cwd);
++#else
++    // The non-portable spawn chdir action was introduced in glibc 2.29.
++    posix_error = ENOSYS;
++#endif
++#else
+ #if defined(__APPLE__) && defined(__clang__)
+ #pragma clang diagnostic push
+ #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+@@ -1216,6 +1224,7 @@ cleanup:
+ #if defined(__APPLE__) && defined(__clang__)
+ #pragma clang diagnostic pop
+ #endif
++#endif
+ #endif
+     if (0 != posix_error) {
+       saved_errno = posix_error;
