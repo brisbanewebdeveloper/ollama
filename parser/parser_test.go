@@ -945,6 +945,7 @@ func TestFilesForModel(t *testing.T) {
 					"model-00002-of-00002.safetensors",
 					"config.json",
 					"tokenizer.json",
+					"chat_template.jinja",
 				}
 				for _, file := range files {
 					if err := os.WriteFile(filepath.Join(dir, file), []byte("test content"), 0o644); err != nil {
@@ -958,6 +959,7 @@ func TestFilesForModel(t *testing.T) {
 				"model-00002-of-00002.safetensors",
 				"config.json",
 				"tokenizer.json",
+				"chat_template.jinja",
 			},
 		},
 		{

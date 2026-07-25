@@ -55,6 +55,8 @@ type Options struct {
 	Client                      coreagent.ChatClient
 	Tools                       *coreagent.Registry
 	Skills                      *coreagent.SkillCatalog
+	ImportSkills                func(string) (coreagent.SkillImportResult, error)
+	ReloadSkills                func() (*coreagent.SkillCatalog, error)
 	ToolRegistryForModel        func(context.Context, string) *coreagent.Registry
 	ToolsDisabled               bool
 	MultiModalForModel          func(context.Context, string) bool
@@ -138,6 +140,8 @@ type chatModel struct {
 	defaultAllowAll    bool
 	permissionNotice   string
 	selection          chatSelection
+
+	systemPromptDisabled bool
 
 	width              int
 	height             int
@@ -224,9 +228,11 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	m.nextImageID, m.nextAudioID = nextInputAttachmentIDsFromMessages(m.messages)
 	m.nextPastedTextID = nextInputPastedTextIDFromMessages(m.messages)
 	m.entries = entriesFromMessages(m.messages)
-	if !m.openModelOnInit {
-		m.refreshContextWindowTokens(m.opts.Model)
-	}
+	// Context window is resolved post-load (chatModelPreloadDoneMsg) rather than
+	// here: for local models /api/ps only reports the running num_ctx after the
+	// model loads, and opts.ContextWindowTokens already holds Show's max as a
+	// pre-load fallback. Refreshing now would just re-derive that same value
+	// (and block construction on a network call).
 	m.contextTokens = m.estimatePromptTokens(m.messages, "")
 	m.contextEstimate = true
 	if m.openModelOnInit {
@@ -375,7 +381,8 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.result.WorkingDir != "" {
 				m.workingDir = msg.result.WorkingDir
 			}
-			m.refreshContextWindowTokens(m.responseModelName(&msg.result.Latest))
+			// Context window is settled by preload (local num_ctx) or is
+			// static (cloud); no refresh needed post-run.
 			m.contextTokens = m.estimatePromptTokens(m.messages, "")
 			m.contextEstimate = true
 			if !messagesEndWithCompactionResult(m.messages) {
@@ -587,6 +594,9 @@ func (m chatModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnter:
 		if msg.Alt {
 			m.insertInputNewline()
+			return m, nil
+		}
+		if m.applySlashCompletion() {
 			return m, nil
 		}
 		return m.handleSubmit()
@@ -1093,7 +1103,6 @@ func (m *chatModel) startSkillRun(name, prompt string) (tea.Model, tea.Cmd) {
 }
 
 func (m *chatModel) startRunWithMessages(displayInput, historyInput string, newMessages []api.Message, extraSystemPrompt, skillName string) (tea.Model, tea.Cmd) {
-	m.refreshContextWindowTokens(m.opts.Model)
 	m.addPromptHistory(historyInput)
 	m.entries = append(m.entries, newChatEntry(chatEntry{role: "user", content: displayInput}))
 	if len(newMessages) > 1 {
