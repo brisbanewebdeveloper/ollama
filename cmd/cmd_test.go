@@ -2218,7 +2218,7 @@ func TestRunOptions_Copy_ThinkValueVariants(t *testing.T) {
 	}
 }
 
-func TestShowInfoImageGen(t *testing.T) {
+func TestShowInfoImageCapability(t *testing.T) {
 	var b bytes.Buffer
 	err := showInfo(&api.ShowResponse{
 		Details: api.ModelDetails{
