@@ -2469,12 +2469,13 @@ func TestAppendContextShiftArgs(t *testing.T) {
 	}
 }
 
-func TestAppendMTPDraftArgs(t *testing.T) {
+func TestAppendDraftArgs(t *testing.T) {
 	tests := []struct {
-		name   string
-		config LlamaServerConfig
-		opts   api.Options
-		want   []string
+		name      string
+		draftType string
+		draftPath string
+		opts      api.Options
+		want      []string
 	}{
 		{
 			name: "no draft model leaves speculative decoding disabled",
@@ -2482,30 +2483,63 @@ func TestAppendMTPDraftArgs(t *testing.T) {
 			want: []string{"base"},
 		},
 		{
-			name:   "embedded draft uses configured draft depth",
-			config: LlamaServerConfig{EnableMTP: true},
-			opts:   api.Options{Runner: api.Runner{DraftNumPredict: 4}},
-			want:   []string{"base", "--spec-type", "draft-mtp", "--spec-draft-n-max", "4", "--spec-draft-backend-sampling"},
+			name:      "embedded MTP draft uses configured draft depth",
+			draftType: draftTypeMTP,
+			opts:      api.Options{Runner: api.Runner{DraftNumPredict: 4}},
+			want:      []string{"base", "--spec-type", "draft-mtp", "--spec-draft-n-max", "4", "--spec-draft-backend-sampling"},
 		},
 		{
-			name:   "separate draft model uses configured draft depth",
-			config: LlamaServerConfig{DraftModelPath: "draft.gguf"},
-			opts:   api.Options{Runner: api.Runner{DraftNumPredict: 8}},
-			want:   []string{"base", "--spec-type", "draft-mtp", "--spec-draft-n-max", "8", "--spec-draft-backend-sampling", "--spec-draft-model", "draft.gguf"},
+			name:      "separate MTP draft uses configured draft depth",
+			draftType: draftTypeMTP,
+			draftPath: "draft.gguf",
+			opts:      api.Options{Runner: api.Runner{DraftNumPredict: 8}},
+			want:      []string{"base", "--spec-type", "draft-mtp", "--spec-draft-n-max", "8", "--spec-draft-backend-sampling", "--spec-draft-model", "draft.gguf"},
 		},
 		{
-			name:   "zero draft depth disables speculative decoding",
-			config: LlamaServerConfig{EnableMTP: true, DraftModelPath: "draft.gguf"},
-			opts:   api.Options{Runner: api.Runner{DraftNumPredict: 0}},
-			want:   []string{"base"},
+			name:      "DFlash draft omits MTP backend sampling",
+			draftType: draftTypeDFlash,
+			draftPath: "draft.gguf",
+			opts:      api.Options{Runner: api.Runner{DraftNumPredict: 4}},
+			want:      []string{"base", "--spec-type", "draft-dflash", "--spec-draft-n-max", "4", "--spec-draft-model", "draft.gguf"},
+		},
+		{
+			name:      "zero draft depth disables speculative decoding",
+			draftType: draftTypeDFlash,
+			draftPath: "draft.gguf",
+			opts:      api.Options{Runner: api.Runner{DraftNumPredict: 0}},
+			want:      []string{"base"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := appendMTPDraftArgs([]string{"base"}, tt.config, tt.opts)
+			got := appendDraftArgs([]string{"base"}, tt.draftType, tt.draftPath, tt.opts)
 			if !slices.Equal(got, tt.want) {
-				t.Fatalf("appendMTPDraftArgs = %v, want %v", got, tt.want)
+				t.Fatalf("appendDraftArgs = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExternalDraftType(t *testing.T) {
+	tests := []struct {
+		architecture string
+		want         string
+	}{
+		{architecture: "dflash", want: draftTypeDFlash},
+		{architecture: "qwen35", want: draftTypeMTP},
+		{architecture: "unknown", want: draftTypeMTP},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.architecture, func(t *testing.T) {
+			path, _ := writeTestGGML(t, ggml.KV{"general.architecture": tt.architecture}, nil)
+			got, err := externalDraftType(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("externalDraftType = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -3605,27 +3639,37 @@ func TestLlamaServerChatMessageConvertsToolCalls(t *testing.T) {
 
 func TestLlamaServerChatMessageConvertsMediaParts(t *testing.T) {
 	png := []byte("\x89PNG\r\n\x1a\n")
+	webp, err := base64.StdEncoding.DecodeString("UklGRhwAAABXRUJQVlA4TA8AAAAvAAAAAAcQ/Y/+ByKi/wEA")
+	if err != nil {
+		t.Fatal(err)
+	}
 	wav := []byte("RIFF\x00\x00\x00\x00WAVE")
 	mp3 := []byte("ID3\x04\x00\x00")
 
 	msg, err := llamaServerChatMessage(Message{
 		Role:    "user",
 		Content: "describe these",
-		Media:   []MediaData{NewMediaData(0, png), NewMediaData(1, wav), NewMediaData(2, mp3)},
+		Media:   []MediaData{NewMediaData(0, png), NewMediaData(1, webp), NewMediaData(2, wav), NewMediaData(3, mp3)},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	parts, ok := msg["content"].([]map[string]any)
-	if !ok || len(parts) != 4 {
-		t.Fatalf("expected four content parts, got %#v", msg["content"])
+	if !ok || len(parts) != 5 {
+		t.Fatalf("expected five content parts, got %#v", msg["content"])
 	}
 	if parts[1]["type"] != "image_url" {
 		t.Fatalf("expected image_url for PNG, got %#v", parts[1])
 	}
+	if imageURL := parts[1]["image_url"].(map[string]any)["url"]; imageURL != "data:image/png;base64,"+base64.StdEncoding.EncodeToString(png) {
+		t.Fatalf("expected PNG to pass through unchanged, got %#v", imageURL)
+	}
+	if imageURL := parts[2]["image_url"].(map[string]any)["url"].(string); !strings.HasPrefix(imageURL, "data:image/png;base64,") {
+		t.Fatalf("expected WebP to be converted to PNG, got %q", imageURL)
+	}
 	for i, want := range []string{"wav", "mp3"} {
-		part := parts[i+2]
+		part := parts[i+3]
 		if part["type"] != "input_audio" {
 			t.Fatalf("expected input_audio for %s, got %#v", want, part)
 		}

@@ -150,6 +150,9 @@ func (r *Runner) prefill(ctx context.Context, session *cacheSession, spec *specu
 	materializeCaches := func() {
 		state := make([]*mlx.Array, 0, 2*len(caches))
 		for _, c := range caches {
+			if c == nil {
+				continue
+			}
 			state = append(state, c.State()...)
 		}
 		if len(state) == 0 {
@@ -181,13 +184,17 @@ func (r *Runner) prefill(ctx context.Context, session *cacheSession, spec *specu
 			Media:        manifest,
 			Layout:       media.rowLayout(),
 		}, caches)
-		spec.committed(chunkIDs, auxHidden, position, manifest)
-		// Unpin finished items before the sweep: the consuming forward's
-		// graph retains their data until evaluation, so the buffers die with
-		// this chunk's eval instead of surviving into the next chunk.
-		media.release(position + n)
+		// Report to the drafter only after the chunk's eval: a draft flush
+		// evaluates, and an eval before the sweep cannot free any buffer the
+		// chunk's live handles retain — on media chunks, the whole vision tower.
+		mlx.Pin(chunkIDs, auxHidden)
 		mlx.Sweep()
 		materializeCaches()
+		spec.committed(chunkIDs, auxHidden, position, manifest)
+		mlx.Unpin(chunkIDs, auxHidden)
+		// Released after committed so the drafter can capture rows its
+		// deferred flush still embeds.
+		media.release(position + n)
 		processed += n
 		position += n
 		slog.Info("Prompt processing progress", "processed", processed, "total", total)

@@ -61,6 +61,26 @@
   },
   "redirects": [
     {
+      "source": "/development.md",
+      "destination": "/development"
+    },
+    {
+      "source": "/api/openai-compatibility.mdx",
+      "destination": "/api/openai-compatibility"
+    },
+    {
+      "source": "/gpu.mdx",
+      "destination": "/gpu"
+    },
+    {
+      "source": "/integrations/vscode.mdx",
+      "destination": "/integrations/vscode"
+    },
+    {
+      "source": "/troubleshooting.mdx",
+      "destination": "/troubleshooting"
+    },
+    {
       "source": "/openai",
       "destination": "/api/openai-compatibility"
     },
@@ -148,6 +168,7 @@
             "pages": [
               "/integrations/claude-code",
               "/integrations/opencode",
+              "/integrations/deepseek-harness",
               "/integrations/cline-cli",
               "/integrations/codex-app",
               "/integrations/codex",
