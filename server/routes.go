@@ -207,14 +207,9 @@ func usesAutomaticNumBatch(model *Model, requestOpts map[string]any) bool {
 
 // scheduleRunner schedules a runner after validating inputs such as capabilities and model options.
 // It returns the allocated runner, model instance, and consolidated options if successful and error otherwise.
-func (s *Server) scheduleRunner(ctx context.Context, name string, caps []model.Capability, requestOpts map[string]any, keepAlive *api.Duration, shift *bool) (llm.LlamaServer, *Model, *api.Options, error) {
-	if name == "" {
+func (s *Server) scheduleRunner(ctx context.Context, model *Model, caps []model.Capability, requestOpts map[string]any, keepAlive *api.Duration, shift *bool) (llm.LlamaServer, *Model, *api.Options, error) {
+	if model == nil || model.Name == "" {
 		return nil, nil, nil, fmt.Errorf("model %w", errRequired)
-	}
-
-	model, err := GetModel(name)
-	if err != nil {
-		return nil, nil, nil, err
 	}
 
 	if slices.Contains(model.Config.ModelFamilies, "mllama") && len(model.ProjectorPaths) > 0 {
@@ -222,7 +217,7 @@ func (s *Server) scheduleRunner(ctx context.Context, name string, caps []model.C
 	}
 
 	if err := model.CheckCapabilities(caps...); err != nil {
-		return nil, nil, nil, fmt.Errorf("%s %w", name, err)
+		return nil, nil, nil, fmt.Errorf("%s %w", model.Name, err)
 	}
 
 	numCtxAuto := usesAutomaticNumCtx(model, requestOpts)
@@ -295,7 +290,7 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 		return
 	}
 
-	m, err := GetModel(name.String())
+	m, err := s.getModel(name.String())
 	if err != nil {
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
@@ -478,7 +473,7 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 		}
 	}
 
-	r, m, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive, req.Shift)
+	r, m, opts, err := s.scheduleRunner(c.Request.Context(), m, caps, req.Options, req.KeepAlive, req.Shift)
 	if errors.Is(err, errCapabilityCompletion) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%q does not support generate", req.Model)})
 		return
@@ -666,7 +661,12 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 		// TODO (jmorganca): avoid building the response twice both here and below
 		var sb strings.Builder
 		defer close(ch)
-		if err := r.Completion(c.Request.Context(), llm.CompletionRequest{
+
+		ctx, cancel := context.WithCancel(c.Request.Context())
+		defer cancel()
+		var parserErr error
+
+		if err := r.Completion(ctx, llm.CompletionRequest{
 			Prompt:          prompt,
 			Media:           media,
 			Format:          req.Format,
@@ -695,7 +695,8 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 			if builtinParser != nil {
 				content, thinking, toolCalls, err := builtinParser.Add(cr.Content, cr.Done)
 				if err != nil {
-					ch <- gin.H{"error": err.Error()}
+					parserErr = err
+					cancel()
 					return
 				}
 				res.Response = content
@@ -741,13 +742,18 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 
 			ch <- res
 		}); err != nil {
-			s.sched.expireRunnersForRuntimeOOM(m, err)
-			var serr api.StatusError
-			if errors.As(err, &serr) {
-				ch <- gin.H{"error": serr.ErrorMessage, "status": serr.StatusCode}
-			} else {
-				ch <- gin.H{"error": err.Error()}
+			if parserErr == nil {
+				s.sched.expireRunnersForRuntimeOOM(m, err)
+				var serr api.StatusError
+				if errors.As(err, &serr) {
+					ch <- gin.H{"error": serr.ErrorMessage, "status": serr.StatusCode}
+				} else {
+					ch <- gin.H{"error": err.Error()}
+				}
 			}
+		}
+		if parserErr != nil {
+			ch <- gin.H{"error": parserErr.Error()}
 		}
 	}()
 
@@ -849,7 +855,13 @@ func (s *Server) EmbedHandler(c *gin.Context) {
 		return
 	}
 
-	r, m, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, req.Options, req.KeepAlive, nil)
+	m, err := s.getModel(name.String())
+	if err != nil {
+		handleScheduleError(c, req.Model, err)
+		return
+	}
+
+	r, m, opts, err := s.scheduleRunner(c.Request.Context(), m, []model.Capability{}, req.Options, req.KeepAlive, nil)
 	if err != nil {
 		handleScheduleError(c, req.Model, err)
 		return
@@ -1061,7 +1073,13 @@ func (s *Server) EmbeddingsHandler(c *gin.Context) {
 
 	name := modelRef.Name
 
-	r, m, _, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, req.Options, req.KeepAlive, nil)
+	m, err := s.getModel(name.String())
+	if err != nil {
+		handleScheduleError(c, req.Model, err)
+		return
+	}
+
+	r, m, _, err := s.scheduleRunner(c.Request.Context(), m, []model.Capability{}, req.Options, req.KeepAlive, nil)
 	if err != nil {
 		handleScheduleError(c, req.Model, err)
 		return
@@ -2473,7 +2491,7 @@ func (s *Server) ChatHandler(c *gin.Context) {
 		return
 	}
 
-	m, err := GetModel(name.String())
+	m, err := s.getModel(name.String())
 	if err != nil {
 		switch {
 		case os.IsNotExist(err):
@@ -2628,7 +2646,7 @@ func (s *Server) ChatHandler(c *gin.Context) {
 		}
 	}
 
-	r, m, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive, req.Shift)
+	r, m, opts, err := s.scheduleRunner(c.Request.Context(), m, caps, req.Options, req.KeepAlive, req.Shift)
 	if errors.Is(err, errCapabilityCompletion) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%q does not support chat", req.Model)})
 		return
@@ -2766,6 +2784,8 @@ func (s *Server) ChatHandler(c *gin.Context) {
 			// sets up new context given parent context per request
 			ctx, cancel := context.WithCancel(c.Request.Context())
 
+			var parserErr error
+
 			err := r.Completion(ctx, llm.CompletionRequest{
 				Prompt:          prompt,
 				Media:           media,
@@ -2804,7 +2824,8 @@ func (s *Server) ChatHandler(c *gin.Context) {
 
 					content, thinking, toolCalls, err := builtinParser.Add(r.Content, r.Done)
 					if err != nil {
-						ch <- gin.H{"error": err.Error()}
+						parserErr = err
+						cancel()
 						return
 					}
 
@@ -2883,6 +2904,10 @@ func (s *Server) ChatHandler(c *gin.Context) {
 
 				ch <- res
 			})
+			if parserErr != nil {
+				ch <- gin.H{"error": parserErr.Error()}
+				return
+			}
 			if err != nil {
 				if structuredOutputsState == structuredOutputsState_ReadyToApply && strings.Contains(err.Error(), "context canceled") && c.Request.Context().Err() == nil {
 					// only ignores error if it's a context cancellation due to setting structured outputs
