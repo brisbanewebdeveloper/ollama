@@ -74,13 +74,15 @@ RUN ln -s /usr/bin/python3 /usr/bin/python \
 ENV VULKAN_SDK=/usr/local
 
 #
-# llama-server stages - rebuild when LLAMA_CPP_VERSION, llama/server/, or llama/compat/ changes.
+# llama-server stages - rebuild when LLAMA_CPP_VERSION, llama/server/, llama/compat/,
+# or the shared compatibility patch applier changes.
 #
 
 FROM cpu-deps AS llama-server-cpu
 COPY LLAMA_CPP_VERSION .
 COPY llama/server llama/server
 COPY llama/compat llama/compat
+COPY cmake/apply-git-patches.cmake cmake/
 RUN --mount=type=cache,target=/root/.ccache \
     cmake -S llama/server --preset cpu \
         && cmake --build build/llama-server-cpu -- -l $(nproc) \
@@ -100,6 +102,7 @@ FROM cuda-12-deps AS llama-server-cuda_v12
 COPY LLAMA_CPP_VERSION .
 COPY llama/server llama/server
 COPY llama/compat llama/compat
+COPY cmake/apply-git-patches.cmake cmake/
 RUN --mount=type=cache,target=/root/.ccache \
     cmake -S llama/server --preset llama_cuda_v12_linux \
         && cmake --build build/llama-server-cuda_v12 -- -l $(nproc) \
@@ -112,6 +115,7 @@ FROM cuda-13-deps AS llama-server-cuda_v13
 COPY LLAMA_CPP_VERSION .
 COPY llama/server llama/server
 COPY llama/compat llama/compat
+COPY cmake/apply-git-patches.cmake cmake/
 RUN --mount=type=cache,target=/root/.ccache \
     cmake -S llama/server --preset llama_cuda_v13_linux \
         "-DCMAKE_CUDA_ARCHITECTURES=75-virtual;80-virtual;86-virtual;89-virtual;90-virtual;90a-virtual;100-virtual;103-virtual;110-virtual" \
@@ -126,6 +130,7 @@ ENV CC=clang CXX=clang++
 COPY LLAMA_CPP_VERSION .
 COPY llama/server llama/server
 COPY llama/compat llama/compat
+COPY cmake/apply-git-patches.cmake cmake/
 RUN --mount=type=cache,target=/root/.ccache \
     cmake -S llama/server --preset rocm_v7_2_linux \
         && cmake --build build/llama-server-rocm_v7_2 -- -l $(nproc) \
@@ -147,6 +152,7 @@ ENV CMAKE_GENERATOR=Ninja
 COPY LLAMA_CPP_VERSION .
 COPY llama/server llama/server
 COPY llama/compat llama/compat
+COPY cmake/apply-git-patches.cmake cmake/
 RUN --mount=type=cache,target=/root/.ccache \
     cmake -S llama/server --preset llama_cuda_jetpack5 \
         && cmake --build build/llama-server-cuda_jetpack5 -- -l $(nproc) \
@@ -167,6 +173,7 @@ ENV CMAKE_GENERATOR=Ninja
 COPY LLAMA_CPP_VERSION .
 COPY llama/server llama/server
 COPY llama/compat llama/compat
+COPY cmake/apply-git-patches.cmake cmake/
 RUN --mount=type=cache,target=/root/.ccache \
     cmake -S llama/server --preset llama_cuda_jetpack6 \
         && cmake --build build/llama-server-cuda_jetpack6 -- -l $(nproc) \
@@ -179,6 +186,7 @@ FROM vulkan-deps AS llama-server-vulkan
 COPY LLAMA_CPP_VERSION .
 COPY llama/server llama/server
 COPY llama/compat llama/compat
+COPY cmake/apply-git-patches.cmake cmake/
 RUN --mount=type=cache,target=/root/.ccache \
     cmake -S llama/server --preset vulkan \
         && cmake --build build/llama-server-vulkan -- -l $(nproc) \
