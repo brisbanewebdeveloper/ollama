@@ -288,7 +288,8 @@ Ollama supports the [OpenAI Responses API](https://platform.openai.com/docs/api-
 #### Supported features
 
 - [x] Streaming
-- [x] Tools (function calling)
+- [x] Tools (function calling and namespaces)
+- [x] Client-executed deferred tool discovery
 - [x] Reasoning summaries (for thinking models)
 - [ ] Stateful requests
 
@@ -305,6 +306,16 @@ Ollama supports the [OpenAI Responses API](https://platform.openai.com/docs/api-
 - [ ] `previous_response_id` (stateful v1/responses not supported)
 - [ ] `conversation` (stateful v1/responses not supported)
 - [ ] `truncation`
+
+#### Deferred tool discovery
+
+Ollama supports the client-executed deferred-tool exchange used by Codex. A `tool_search` declaration is exposed to the local model as a callable tool. When the model calls it, Ollama returns a `tool_search_call` item with object-valued `arguments` in both streaming and non-streaming Responses output.
+
+On the following request, Ollama accepts the matching `tool_search_call` and `tool_search_output` history items. Function declarations supplied in `tool_search_output.tools` become model-visible for that inference, including functions grouped under a namespace. Ollama also accepts Responses Lite `additional_tools` input items and registers their function, namespace, and `tool_search` declarations without treating the item as conversation text.
+
+Ollama flattens a namespace and member name with a period only in its internal chat-tool representation. Responses output uses the protocol's separate `namespace` and `name` fields, and replayed namespaced calls are converted back to the qualified internal name.
+
+Client-executed search items require a non-empty `call_id`; `tool_search_call.arguments` must be an object. Legacy server-executed search call/output items with a null call ID are accepted as history metadata, but Ollama does not perform server-side deferred-tool ranking or discovery. Deferred custom/freeform tools are not currently promoted; deferred function tools and namespace members are supported. The `defer_loading` marker is accepted but has no effect after a tool has been supplied in `additional_tools` or `tool_search_output`.
 
 ## Models
 

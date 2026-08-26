@@ -416,13 +416,14 @@ func (t *ToolPropertiesMap) UnmarshalJSON(data []byte) error {
 }
 
 type ToolProperty struct {
-	AnyOf       []ToolProperty     `json:"anyOf,omitempty"`
-	Type        PropertyType       `json:"type,omitempty"`
-	Items       any                `json:"items,omitempty"`
-	Description string             `json:"description,omitempty"`
-	Enum        []any              `json:"enum,omitempty"`
-	Properties  *ToolPropertiesMap `json:"properties,omitempty"`
-	Required    []string           `json:"required,omitempty"`
+	AnyOf            []ToolProperty             `json:"anyOf,omitempty"`
+	Type             PropertyType               `json:"type,omitempty"`
+	Items            any                        `json:"items,omitempty"`
+	Description      string                     `json:"description,omitempty"`
+	Enum             []any                      `json:"enum,omitempty"`
+	Properties       *ToolPropertiesMap         `json:"properties,omitempty"`
+	Required         []string                   `json:"required,omitempty"`
+	AdditionalFields map[string]json.RawMessage `json:"-"`
 }
 
 // ToTypeScriptType converts a ToolProperty to a TypeScript type string
@@ -471,11 +472,12 @@ func mapToTypeScriptType(jsonType string) string {
 }
 
 type ToolFunctionParameters struct {
-	Type       string             `json:"type"`
-	Defs       any                `json:"$defs,omitempty"`
-	Items      any                `json:"items,omitempty"`
-	Required   []string           `json:"required,omitempty"`
-	Properties *ToolPropertiesMap `json:"properties"`
+	Type             string                     `json:"type"`
+	Defs             any                        `json:"$defs,omitempty"`
+	Items            any                        `json:"items,omitempty"`
+	Required         []string                   `json:"required,omitempty"`
+	Properties       *ToolPropertiesMap         `json:"properties"`
+	AdditionalFields map[string]json.RawMessage `json:"-"`
 }
 
 func (t *ToolFunctionParameters) String() string {
