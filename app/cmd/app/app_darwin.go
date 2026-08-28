@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -39,6 +40,7 @@ import (
 	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/internal/modelref"
 	"github.com/ollama/ollama/internal/proxy"
+	"golang.org/x/sys/unix"
 )
 
 var ollamaPath = func() string {
@@ -213,9 +215,259 @@ func maybeMoveAndRestart() appMove {
 	return status
 }
 
-// handleExistingInstance handles existing instances on macOS
-func handleExistingInstance(_ bool) {
-	C.killOtherInstances()
+type appProcessIdentity struct {
+	pid       int
+	startedAt int64
+}
+
+func (p appProcessIdentity) sameProcess(other appProcessIdentity) bool {
+	return p.pid == other.pid && p.startedAt == other.startedAt
+}
+
+func (p appProcessIdentity) startedAfter(other appProcessIdentity) bool {
+	if p.startedAt != other.startedAt {
+		return p.startedAt > other.startedAt
+	}
+	return p.pid > other.pid
+}
+
+type appProcessStopMode uint8
+
+const (
+	appProcessStopForHandoff appProcessStopMode = iota
+	appProcessStopGracefully
+	appProcessStopForcefully
+)
+
+type appProcessController struct {
+	discover func() ([]appProcessIdentity, error)
+	running  func(appProcessIdentity) (bool, error)
+	stop     func(appProcessIdentity, appProcessStopMode) error
+}
+
+type appSyncBarrierConfig struct {
+	handoffTimeout   time.Duration
+	terminateTimeout time.Duration
+	killTimeout      time.Duration
+	pollInterval     time.Duration
+	settlePeriod     time.Duration
+}
+
+// runAppSyncBarrier elects the newest launch, stops every older instance, and
+// returns only after no other instances remain.
+func runAppSyncBarrier(self appProcessIdentity, controller appProcessController, config appSyncBarrierConfig) error {
+	started := time.Now()
+	handoffDeadline := started.Add(config.handoffTimeout)
+	terminateDeadline := handoffDeadline.Add(config.terminateTimeout)
+	deadline := terminateDeadline.Add(config.killTimeout)
+	sawEmpty := false
+
+	for {
+		processes, err := controller.discover()
+		if err != nil {
+			return err
+		}
+		// Overlapping launches are ordered by process age. Only the newest
+		// candidate may terminate existing instances.
+		for _, process := range processes {
+			if process.startedAfter(self) {
+				return fmt.Errorf("%w: pid %d", errNewerAppInstance, process.pid)
+			}
+		}
+
+		// Require two consecutive empty snapshots so a process that is still
+		// appearing in NSWorkspace cannot slip through the barrier.
+		if len(processes) == 0 {
+			if sawEmpty {
+				return nil
+			}
+			sawEmpty = true
+			if !time.Now().Before(deadline) {
+				return fmt.Errorf("timed out waiting for app instances to exit")
+			}
+			time.Sleep(config.settlePeriod)
+			continue
+		}
+		sawEmpty = false
+
+		for _, process := range processes {
+			if err := controller.stop(process, appProcessStopForHandoff); err != nil {
+				return err
+			}
+		}
+		exited, err := waitForAppProcesses(processes, controller, handoffDeadline, config.pollInterval)
+		if err != nil {
+			return err
+		}
+		if !exited {
+			for _, process := range processes {
+				if err := controller.stop(process, appProcessStopGracefully); err != nil {
+					return err
+				}
+			}
+			exited, err = waitForAppProcesses(processes, controller, terminateDeadline, config.pollInterval)
+			if err != nil {
+				return err
+			}
+		}
+		if !exited {
+			// Graceful shutdown owns most of the deadline. Force only exact
+			// surviving identities so one stuck instance cannot block update.
+			for _, process := range processes {
+				if err := controller.stop(process, appProcessStopForcefully); err != nil {
+					return err
+				}
+			}
+			exited, err = waitForAppProcesses(processes, controller, deadline, config.pollInterval)
+			if err != nil {
+				return err
+			}
+		}
+		if !exited {
+			return fmt.Errorf("timed out waiting for app instances to exit")
+		}
+	}
+}
+
+func waitForAppProcesses(processes []appProcessIdentity, controller appProcessController, deadline time.Time, pollInterval time.Duration) (bool, error) {
+	for {
+		running := false
+		for _, process := range processes {
+			alive, err := controller.running(process)
+			if err != nil {
+				return false, err
+			}
+			running = running || alive
+		}
+		if !running {
+			return true, nil
+		}
+		if !time.Now().Before(deadline) {
+			return false, nil
+		}
+		time.Sleep(pollInterval)
+	}
+}
+
+const (
+	appSyncBarrierHandoffTimeout   = 5 * time.Second
+	appSyncBarrierTerminateTimeout = 30 * time.Second
+	appSyncBarrierKillTimeout      = 5 * time.Second
+	appSyncBarrierPollInterval     = 50 * time.Millisecond
+	appSyncBarrierSettlePeriod     = 100 * time.Millisecond
+)
+
+var errNewerAppInstance = errors.New("newer app instance owns the handoff")
+
+var killOtherInstances = runDarwinAppSyncBarrier
+
+// Once a replacement handoff starts, later shutdown signals must not restore
+// the Claude profile out from under the new app.
+var appHandoffInProgress atomic.Bool
+
+func darwinProcessIdentityForPID(pid int) (appProcessIdentity, error) {
+	process, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil {
+		if errors.Is(err, unix.EIO) && errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+			return appProcessIdentity{}, syscall.ESRCH
+		}
+		return appProcessIdentity{}, err
+	}
+	if int(process.Proc.P_pid) != pid {
+		return appProcessIdentity{}, syscall.ESRCH
+	}
+	return appProcessIdentity{
+		pid:       pid,
+		startedAt: process.Proc.P_starttime.Sec*1_000_000 + int64(process.Proc.P_starttime.Usec),
+	}, nil
+}
+
+func darwinOtherOllamaProcesses() ([]appProcessIdentity, error) {
+	var discovered *C.AppProcessIdentity
+	var count C.size_t
+	if !C.otherOllamaProcesses(&discovered, &count) {
+		return nil, errors.New("discover other Ollama app processes")
+	}
+	defer C.free(unsafe.Pointer(discovered))
+
+	identities := unsafe.Slice(discovered, int(count))
+	processes := make([]appProcessIdentity, len(identities))
+	for i, process := range identities {
+		processes[i] = appProcessIdentity{pid: int(process.pid), startedAt: int64(process.started_at)}
+	}
+	return processes, nil
+}
+
+func darwinAppProcessRunning(expected appProcessIdentity) (bool, error) {
+	actual, err := darwinProcessIdentityForPID(expected.pid)
+	if errors.Is(err, syscall.ESRCH) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect Ollama app process %d: %w", expected.pid, err)
+	}
+	return actual.sameProcess(expected), nil
+}
+
+func stopDarwinAppProcess(process appProcessIdentity, mode appProcessStopMode) error {
+	running, err := darwinAppProcessRunning(process)
+	if err != nil || !running {
+		return err
+	}
+	processSignal := syscall.SIGUSR1
+	switch mode {
+	case appProcessStopGracefully:
+		processSignal = syscall.SIGTERM
+	case appProcessStopForcefully:
+		processSignal = syscall.SIGKILL
+	}
+	slog.Info("signaling Ollama app process", "pid", process.pid, "signal", processSignal)
+	if err := syscall.Kill(process.pid, processSignal); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("signal Ollama app process %d: %w", process.pid, err)
+	}
+	return nil
+}
+
+func runDarwinAppSyncBarrier() bool {
+	// NSWorkspace snapshots are not atomic, so two concurrent launches can both
+	// pass if neither is visible yet. This edge case is intentionally unhandled.
+	self, err := darwinProcessIdentityForPID(os.Getpid())
+	if err == nil {
+		err = runAppSyncBarrier(self, appProcessController{
+			discover: darwinOtherOllamaProcesses,
+			running:  darwinAppProcessRunning,
+			stop:     stopDarwinAppProcess,
+		}, appSyncBarrierConfig{
+			handoffTimeout:   appSyncBarrierHandoffTimeout,
+			terminateTimeout: appSyncBarrierTerminateTimeout,
+			killTimeout:      appSyncBarrierKillTimeout,
+			pollInterval:     appSyncBarrierPollInterval,
+			settlePeriod:     appSyncBarrierSettlePeriod,
+		})
+	}
+	switch {
+	case errors.Is(err, errNewerAppInstance):
+		slog.Info("newer Ollama app instance owns the handoff")
+	case err != nil:
+		slog.Warn("app instance sync barrier failed, continuing startup", "error", err)
+	}
+	return continueAfterBarrierError(err)
+}
+
+// continueAfterBarrierError reports whether startup may proceed after the sync
+// barrier. Losing the election to a newer instance is the only reason to block
+// launch; any other failure leaves at most a stale instance running, so the
+// app warns and continues rather than refusing to start.
+func continueAfterBarrierError(err error) bool {
+	return err == nil || !errors.Is(err, errNewerAppInstance)
+}
+
+// handleExistingInstance handles existing instances on macOS.
+func handleExistingInstance(_ bool) bool {
+	if !isApp {
+		return true
+	}
+	return killOtherInstances()
 }
 
 func installSymlink() {
@@ -268,8 +520,7 @@ func osRun(_ func(), hasCompletedFirstRun, startHidden, showOnboarding bool, _ s
 		select {
 		case <-handoffSignal:
 			slog.Info("received app handoff signal, shutting down")
-			stopClaudeAppProxy()
-			C.quit()
+			quitForHandoff()
 		case <-handoffDone:
 		}
 	}()
@@ -411,12 +662,8 @@ func resolveClaudeDesktopStartupCatalog(ctx context.Context) (available, selecte
 		if err != nil {
 			slog.Debug("could not load account cloud models for Claude startup", "error", err)
 		} else {
-			available = mergeClaudeDesktopCloudInventory(available, cloudModels, false)
-			if hasExplicitCloudClaudeDesktopModelName(selectedNames) {
-				selectable = mergeClaudeDesktopCloudInventory(available, cloudModels, true)
-			} else {
-				selectable = available
-			}
+			available = mergeClaudeDesktopCloudInventory(available, cloudModels)
+			selectable = available
 		}
 	}
 	if len(savedMappings) > 0 {
@@ -424,10 +671,7 @@ func resolveClaudeDesktopStartupCatalog(ctx context.Context) (available, selecte
 	} else if len(selectedNames) == 0 {
 		selected = proxy.MapClaudeDesktopModels(
 			selectable,
-			proxy.DefaultClaudeDesktopMappingsForModels(
-				selectable,
-				err == nil && claudeDesktopHasFullDefaultAccess(state),
-			),
+			proxy.DefaultClaudeDesktopMappingsForModels(selectable),
 		)
 	} else {
 		selected = proxy.SelectClaudeDesktopModels(selectable, selectedNames)
@@ -501,8 +745,12 @@ func refreshClaudeDesktopCatalog(ctx context.Context, current []proxy.ClaudeDesk
 	cloudInventoryKnown := false
 	if reloaded {
 		available, source = claudeModelsLoader(ctx)
-		if source == "fallback" && len(previous) > 0 {
-			available = preserveClaudeDesktopEntitlements(available, previous)
+		if source == "fallback" {
+			if len(previous) > 0 {
+				available = proxy.PreserveClaudeDesktopCloudEntitlements(available, previous)
+			}
+			available = proxy.WithoutClaudeDesktopRecommendationMappings(available)
+			current = proxy.WithoutClaudeDesktopRecommendationMappings(current)
 		}
 		state, err := claudeAccessStateResolver(ctx)
 		if err == nil && state.Cloud == proxy.ClaudeDesktopCloudOn {
@@ -512,7 +760,7 @@ func refreshClaudeDesktopCatalog(ctx context.Context, current []proxy.ClaudeDesk
 			} else {
 				cloudInventory = cloudModels
 				cloudInventoryKnown = true
-				available = mergeClaudeDesktopCloudInventory(available, cloudInventory, false)
+				available = mergeClaudeDesktopCloudInventory(available, cloudInventory)
 			}
 		}
 	}
@@ -526,7 +774,7 @@ func refreshClaudeDesktopCatalog(ctx context.Context, current []proxy.ClaudeDesk
 		if cloudInventoryKnown {
 			for _, accountModel := range cloudInventory {
 				if accountModel.Name == model.Name || accountModel.OllamaModel == model.OllamaModel {
-					available = mergeClaudeDesktopCloudInventory(available, []proxy.ClaudeDesktopModel{accountModel}, true)
+					available = mergeClaudeDesktopCloudInventory(available, []proxy.ClaudeDesktopModel{accountModel})
 					break
 				}
 			}
@@ -561,25 +809,6 @@ func configuredClaudeDesktopModels(available, current []proxy.ClaudeDesktopModel
 		return proxy.MapClaudeDesktopModels(available, mappings)
 	}
 	return proxy.SelectClaudeDesktopModels(available, launch.ClaudeDesktopModels())
-}
-
-func preserveClaudeDesktopEntitlements(fallback, previous []proxy.ClaudeDesktopModel) []proxy.ClaudeDesktopModel {
-	models := proxy.UnverifyClaudeDesktopCloudEntitlements(fallback)
-	known := make(map[string]proxy.ClaudeDesktopModel, len(previous)*2)
-	for _, model := range previous {
-		known[model.Name] = model
-		known[model.OllamaModel] = model
-	}
-	for i, model := range models {
-		if prior, ok := known[model.Name]; ok {
-			models[i] = prior
-			continue
-		}
-		if prior, ok := known[model.OllamaModel]; ok {
-			models[i] = prior
-		}
-	}
-	return models
 }
 
 func loadClaudeDesktopModels(ctx context.Context) ([]proxy.ClaudeDesktopModel, string) {
@@ -690,14 +919,11 @@ func includeSelectedClaudeDesktopModels(available, selected []proxy.ClaudeDeskto
 	return models
 }
 
-func mergeClaudeDesktopCloudInventory(available, cloudModels []proxy.ClaudeDesktopModel, appendMissing bool) []proxy.ClaudeDesktopModel {
+func mergeClaudeDesktopCloudInventory(available, cloudModels []proxy.ClaudeDesktopModel) []proxy.ClaudeDesktopModel {
 	models := proxy.VerifyClaudeDesktopModelsWithCloudInventory(available, cloudModels)
 	seen := make(map[string]struct{}, len(models))
 	for _, model := range models {
 		seen[model.OllamaModel] = struct{}{}
-	}
-	if !appendMissing {
-		return models
 	}
 	for _, model := range cloudModels {
 		if _, ok := seen[model.OllamaModel]; ok {
@@ -833,25 +1059,6 @@ func ensureClaudeDesktopModelsAvailable(ctx context.Context, models []proxy.Clau
 		case <-ctx.Done():
 			timer.Stop()
 			return ctx.Err()
-		case <-timer.C:
-		}
-	}
-}
-
-func resolveClaudeDesktopAccessStateWithRetry(ctx context.Context) (proxy.ClaudeDesktopAccessState, error) {
-	deadline := time.Now().Add(claudeAccessRetryWait)
-	for {
-		state, err := claudeAccessStateResolver(ctx)
-		if err == nil || time.Now().After(deadline) {
-			return state, err
-		}
-		slog.Debug("could not resolve Claude model access while refreshing defaults", "error", err)
-
-		timer := time.NewTimer(claudeAccessRetryPoll)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return state, ctx.Err()
 		case <-timer.C:
 		}
 	}
@@ -1185,11 +1392,8 @@ func getClaudeDesktopConnectionStatus() claudeDesktopStatus {
 		})
 	}
 	mappedModels := proxy.ClaudeDesktopMappings(selectedModels)
-	if len(launch.ClaudeDesktopModels()) == 0 {
-		mappedModels = proxy.DefaultClaudeDesktopMappingsForModels(
-			availableModels,
-			claudeDesktopHasFullDefaultAccess(accessState),
-		)
+	if len(mappedModels) == 0 && len(launch.ClaudeDesktopModels()) == 0 {
+		mappedModels = proxy.DefaultClaudeDesktopMappingsForModels(availableModels)
 	}
 	mappingStatuses := make([]claudeDesktopMappingStatus, 0, proxy.MaxClaudeDesktopModels)
 	for _, route := range proxy.ClaudeDesktopRoutes() {
@@ -1212,51 +1416,11 @@ func getClaudeDesktopConnectionStatus() claudeDesktopStatus {
 	return status
 }
 
-func claudeDesktopHasFullDefaultAccess(state proxy.ClaudeDesktopAccessState) bool {
-	fullAccess, known := claudeDesktopDefaultAccessTier(state)
-	return known && fullAccess
-}
-
-func claudeDesktopDefaultAccessTier(state proxy.ClaudeDesktopAccessState) (fullAccess, known bool) {
-	if state.Account != proxy.ClaudeDesktopAccountSignedIn {
-		return false, false
-	}
-	plan := strings.TrimSpace(state.Plan)
-	if plan == "" {
-		return false, false
-	}
-	return !strings.EqualFold(plan, "free"), true
-}
-
-func claudeDesktopDefaultMappingsComplete(mappings map[string]string, fullAccess bool) bool {
-	required := proxy.DefaultClaudeDesktopMappings(fullAccess)
-	if len(mappings) != len(required) {
-		return false
-	}
-	for route := range required {
-		if strings.TrimSpace(mappings[route]) == "" {
-			return false
-		}
-	}
-	return true
-}
-
 func resolveClaudeDesktopDefaultMappings(ctx context.Context) (map[string]string, error) {
-	state, err := resolveClaudeDesktopAccessStateWithRetry(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("resolve Claude model access: %w", err)
-	}
-	if state.Cloud != proxy.ClaudeDesktopCloudOn {
-		return nil, errors.New("Claude model mapping defaults require Cloud to be enabled")
-	}
-	fullAccess, known := claudeDesktopDefaultAccessTier(state)
-	if !known {
-		return nil, errors.New("Claude model mapping defaults require a signed-in account")
-	}
 	available, _ := claudeModelsLoader(ctx)
-	mappings := proxy.DefaultClaudeDesktopMappingsForModels(available, fullAccess)
-	if !claudeDesktopDefaultMappingsComplete(mappings, fullAccess) {
-		return nil, errors.New("could not resolve every Claude model mapping default")
+	mappings := proxy.DefaultClaudeDesktopMappingsForModels(available)
+	if len(mappings) == 0 {
+		return nil, errors.New("no Claude model mapping defaults are available")
 	}
 	return mappings, nil
 }
@@ -1399,14 +1563,14 @@ func applyClaudeDesktopMappingsWithOpen(mappings map[string]string, restartConfi
 		if err != nil {
 			slog.Debug("could not load account cloud models for Claude selection", "error", err)
 		} else {
-			selectable = mergeClaudeDesktopCloudInventory(available, cloudModels, true)
+			selectable = mergeClaudeDesktopCloudInventory(available, cloudModels)
 		}
 	}
 	selected, err := mapKnownClaudeDesktopModels(selectable, current, localNames, mappings)
 	if err != nil {
 		return false, err
 	}
-	if err := validateClaudeDesktopModels(selected, accessState, localNames, localErr == nil); err != nil {
+	if err := ensureClaudeDesktopModelsAvailable(context.Background(), selected); err != nil {
 		return false, err
 	}
 
@@ -1665,18 +1829,22 @@ func stopClaudeAppProxy() {
 	}
 }
 
+func quitForHandoff() {
+	appHandoffInProgress.Store(true)
+	quit()
+}
+
 func quit() {
 	ctx, cancel := context.WithTimeout(context.Background(), claudeShutdownTimeout)
 	defer cancel()
-	handoff := bool(C.otherOllamaInstanceRunning())
-	if err := restoreClaudeAppForTermination(ctx, handoff); err != nil {
+	if err := restoreClaudeAppForTermination(ctx, appHandoffInProgress.Load()); err != nil {
 		slog.Warn("failed to restore Claude before quitting", "error", err)
 	}
 	C.quit()
 }
 
-func restoreClaudeBeforeQuit(ctx context.Context, handoff, configured bool, restore func(context.Context) error) error {
-	if handoff || !configured {
+func restoreClaudeBeforeQuit(ctx context.Context, configured bool, restore func(context.Context) error) error {
+	if !configured {
 		return nil
 	}
 	return restore(ctx)
@@ -1691,7 +1859,7 @@ func restoreClaudeAppForTermination(ctx context.Context, handoff bool) error {
 		return nil
 	}
 	configured := claudeDesktop.UsesOllamaGateway()
-	err := restoreClaudeBeforeQuit(ctx, handoff, configured, claudeDesktop.RestoreForShutdown)
+	err := restoreClaudeBeforeQuit(ctx, configured, claudeDesktop.RestoreForShutdown)
 	if !claudeDesktop.UsesOllamaGateway() {
 		stopClaudeAppProxy()
 	}
