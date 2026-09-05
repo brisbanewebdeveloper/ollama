@@ -48,7 +48,14 @@ func TestDeferredResponsesInputItemsDecodeAndRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatalf("input[3] type = %T, want ResponsesToolSearchOutput", request.Input.Items[3])
 	}
-	if len(output.Tools) != 1 || output.Tools[0].Name != "mcp__example" {
+	var tool ResponsesTool
+	if len(output.Tools) != 1 {
+		t.Fatalf("decoded tool search output = %#v", output)
+	}
+	if err := json.Unmarshal(output.Tools[0], &tool); err != nil {
+		t.Fatal(err)
+	}
+	if tool.Name != "mcp__example" {
 		t.Fatalf("decoded tool search output = %#v", output)
 	}
 
@@ -225,6 +232,15 @@ func TestServerExecutedToolSearchHistoryIsMetadata(t *testing.T) {
 	}
 	if findChatTool(chat.Tools, "loaded") == nil {
 		t.Fatal("tool supplied by server search output was not registered")
+	}
+	for _, item := range request.Input.Items {
+		message, _, err := compactionMessage(item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if message.Role != "assistant" || len(message.ToolCalls) != 0 || message.ToolCallID != "" || message.Content == "" {
+			t.Fatalf("server search metadata became a paired compaction tool call: %#v", message)
+		}
 	}
 }
 

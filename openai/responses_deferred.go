@@ -3,7 +3,6 @@ package openai
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/ollama/ollama/api"
 )
@@ -71,12 +70,12 @@ func (ResponsesToolSearchCall) responsesInputItem() {}
 // preceding tool_search_call. The declarations become callable for this
 // inference request.
 type ResponsesToolSearchOutput struct {
-	ID        string          `json:"id,omitempty"`
-	Type      string          `json:"type"` // always "tool_search_output"
-	CallID    *string         `json:"call_id"`
-	Status    string          `json:"status"`
-	Execution string          `json:"execution"`
-	Tools     []ResponsesTool `json:"tools"`
+	ID        string            `json:"id,omitempty"`
+	Type      string            `json:"type"` // always "tool_search_output"
+	CallID    *string           `json:"call_id"`
+	Status    string            `json:"status"`
+	Execution string            `json:"execution"`
+	Tools     []json.RawMessage `json:"tools"`
 }
 
 func (ResponsesToolSearchOutput) responsesInputItem() {}
@@ -132,16 +131,7 @@ func appendConvertedTool(tools *[]api.Tool, indexes map[string]int, tool api.Too
 }
 
 func responsesRequestToolDeclarations(request ResponsesRequest) []ResponsesTool {
-	tools := append([]ResponsesTool(nil), request.Tools...)
-	for _, item := range request.Input.Items {
-		switch item := item.(type) {
-		case ResponsesAdditionalTools:
-			tools = append(tools, item.Tools...)
-		case ResponsesToolSearchOutput:
-			tools = append(tools, item.Tools...)
-		}
-	}
-	return tools
+	return responsesRequestTools(request)
 }
 
 func toolSearchExecution(request ResponsesRequest, name string) (string, bool) {
@@ -164,22 +154,7 @@ func toolSearchExecution(request ResponsesRequest, name string) (string, bool) {
 // internal chat API so Responses clients receive the namespace and member name
 // as separate fields.
 func responsesFunctionIdentity(request ResponsesRequest, qualifiedName string) (string, string) {
-	for _, tool := range responsesRequestToolDeclarations(request) {
-		if tool.Type != "namespace" || tool.Name == "" {
-			continue
-		}
-		prefix := tool.Name + "."
-		for _, member := range tool.Tools {
-			memberName := member.Name
-			if !strings.HasPrefix(memberName, prefix) {
-				memberName = prefix + memberName
-			}
-			if memberName == qualifiedName {
-				return tool.Name, strings.TrimPrefix(memberName, prefix)
-			}
-		}
-	}
-	return "", qualifiedName
+	return responsesToolCallName(responsesRequestToolDeclarations(request), qualifiedName)
 }
 
 // ResponsesToolCallOutputItems converts internal chat tool calls to their
