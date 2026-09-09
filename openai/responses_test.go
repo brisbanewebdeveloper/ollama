@@ -1,13 +1,43 @@
 package openai
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	stdimage "image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ollama/ollama/api"
 )
+
+func testResponseImageURLs(t *testing.T) map[string]string {
+	t.Helper()
+
+	img := stdimage.NewRGBA(stdimage.Rect(0, 0, 1, 1))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	urls := make(map[string]string)
+	for _, tc := range []struct {
+		name   string
+		encode func(*bytes.Buffer) error
+	}{
+		{name: "jpeg", encode: func(buf *bytes.Buffer) error { return jpeg.Encode(buf, img, nil) }},
+		{name: "png", encode: func(buf *bytes.Buffer) error { return png.Encode(buf, img) }},
+	} {
+		var buf bytes.Buffer
+		if err := tc.encode(&buf); err != nil {
+			t.Fatalf("encode %s fixture: %v", tc.name, err)
+		}
+		urls[tc.name] = "data:image/" + tc.name + ";base64," + base64.StdEncoding.EncodeToString(buf.Bytes())
+	}
+
+	urls["webp"] = "data:image/webp;base64,UklGRhwAAABXRUJQVlA4TA8AAAAvAAAAAAcQ/Y/+ByKi/wEA"
+	return urls
+}
 
 func TestResponsesInputMessage_UnmarshalJSON(t *testing.T) {
 	tests := []struct {
@@ -1769,11 +1799,10 @@ func TestFromResponsesRequest_FunctionCallMerge(t *testing.T) {
 }
 
 func TestDecodeImageURL(t *testing.T) {
-	// Valid PNG base64 (1x1 red pixel)
-	validPNG := "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
+	urls := testResponseImageURLs(t)
 
 	t.Run("valid png", func(t *testing.T) {
-		img, err := decodeImageURL(validPNG)
+		img, err := decodeImageURL(urls["png"])
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1783,17 +1812,38 @@ func TestDecodeImageURL(t *testing.T) {
 	})
 
 	t.Run("valid jpeg", func(t *testing.T) {
-		// Just test the prefix validation with minimal base64
-		_, err := decodeImageURL("data:image/jpeg;base64,/9j/4AAQSkZJRg==")
+		_, err := decodeImageURL(urls["jpeg"])
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("valid webp", func(t *testing.T) {
+		_, err := decodeImageURL(urls["webp"])
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
 
 	t.Run("blank mime type", func(t *testing.T) {
-		_, err := decodeImageURL("data:;base64,dGVzdA==")
+		_, err := decodeImageURL(strings.Replace(urls["png"], "data:image/png", "data:", 1))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("mime mismatch", func(t *testing.T) {
+		_, err := decodeImageURL(strings.Replace(urls["png"], "image/png", "image/webp", 1))
+		if err == nil || !strings.Contains(err.Error(), "declared MIME type") {
+			t.Fatalf("expected MIME mismatch error, got %v", err)
+		}
+	})
+
+	t.Run("corrupt webp", func(t *testing.T) {
+		corrupt := base64.StdEncoding.EncodeToString([]byte("RIFF\x10\x00\x00\x00WEBPVP8 invalid"))
+		_, err := decodeImageURL("data:image/webp;base64," + corrupt)
+		if err == nil || !strings.Contains(err.Error(), "corrupt image data") {
+			t.Fatalf("expected corrupt image error, got %v", err)
 		}
 	})
 
@@ -1815,6 +1865,74 @@ func TestDecodeImageURL(t *testing.T) {
 		_, err := decodeImageURL("https://example.com/image.png")
 		if err == nil {
 			t.Error("expected error for non-data URL")
+		}
+	})
+}
+
+func TestFromResponsesRequest_ImageInputMatrix(t *testing.T) {
+	urls := testResponseImageURLs(t)
+
+	for _, format := range []string{"jpeg", "png", "webp"} {
+		t.Run("user "+format, func(t *testing.T) {
+			req := ResponsesRequest{Input: ResponsesInput{Items: []ResponsesInputItem{
+				ResponsesInputMessage{Type: "message", Role: "user", Content: []ResponsesContent{
+					ResponsesTextContent{Type: "input_text", Text: "inspect"},
+					ResponsesImageContent{Type: "input_image", ImageURL: urls[format]},
+				}},
+			}}}
+			chatReq, err := FromResponsesRequest(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(chatReq.Messages) != 1 || len(chatReq.Messages[0].Images) != 1 {
+				t.Fatalf("unexpected converted messages: %+v", chatReq.Messages)
+			}
+		})
+
+		t.Run("tool "+format, func(t *testing.T) {
+			req := ResponsesRequest{Input: ResponsesInput{Items: []ResponsesInputItem{
+				ResponsesFunctionCall{Type: "function_call", CallID: "call_1", Name: "inspect", Arguments: "{}"},
+				ResponsesFunctionCallOutput{Type: "function_call_output", CallID: "call_1", OutputItems: []ResponsesContent{
+					ResponsesImageContent{Type: "input_image", ImageURL: urls[format]},
+				}},
+			}}}
+			chatReq, err := FromResponsesRequest(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(chatReq.Messages) != 2 || chatReq.Messages[1].ToolCallID != "call_1" || len(chatReq.Messages[1].Images) != 1 {
+				t.Fatalf("tool output association was not preserved: %+v", chatReq.Messages)
+			}
+		})
+	}
+
+	t.Run("prior jpeg followed by three webp tool outputs", func(t *testing.T) {
+		items := []ResponsesInputItem{
+			ResponsesInputMessage{Type: "message", Role: "user", Content: []ResponsesContent{
+				ResponsesImageContent{Type: "input_image", ImageURL: urls["jpeg"]},
+			}},
+		}
+		for _, callID := range []string{"call_1", "call_2", "call_3"} {
+			items = append(items,
+				ResponsesFunctionCall{Type: "function_call", CallID: callID, Name: "inspect", Arguments: "{}"},
+				ResponsesFunctionCallOutput{Type: "function_call_output", CallID: callID, OutputItems: []ResponsesContent{
+					ResponsesImageContent{Type: "input_image", ImageURL: urls["webp"]},
+				}},
+			)
+		}
+
+		chatReq, err := FromResponsesRequest(ResponsesRequest{Input: ResponsesInput{Items: items}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(chatReq.Messages) != 7 || len(chatReq.Messages[0].Images) != 1 {
+			t.Fatalf("unexpected converted messages: %+v", chatReq.Messages)
+		}
+		for i, callID := range []string{"call_1", "call_2", "call_3"} {
+			toolMessage := chatReq.Messages[2+i*2]
+			if toolMessage.ToolCallID != callID || len(toolMessage.Images) != 1 {
+				t.Fatalf("tool output %d association was not preserved: %+v", i, toolMessage)
+			}
 		}
 	})
 }

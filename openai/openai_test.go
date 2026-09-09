@@ -27,7 +27,7 @@ var argsComparer = cmp.Comparer(func(a, b api.ToolCallFunctionArguments) bool {
 })
 
 const (
-	prefix = `data:image/jpeg;base64,`
+	prefix = `data:image/png;base64,`
 	image  = `iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=`
 )
 

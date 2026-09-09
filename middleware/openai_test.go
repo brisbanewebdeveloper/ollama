@@ -1804,3 +1804,65 @@ func TestResponsesMiddlewareZstd(t *testing.T) {
 		})
 	}
 }
+
+func TestResponsesMiddlewareRejectsCorruptWebPBeforeModelHandler(t *testing.T) {
+	corrupt := base64.StdEncoding.EncodeToString([]byte("RIFF\x10\x00\x00\x00WEBPVP8 invalid"))
+	body := `{"model":"test-model","input":[{"type":"message","role":"user","content":[{"type":"input_image","detail":"high","image_url":"data:image/webp;base64,` + corrupt + `"}]}]}`
+	modelHandlerCalled := false
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/v1/responses", ResponsesMiddleware(), func(c *gin.Context) {
+		modelHandlerCalled = true
+		c.Status(http.StatusOK)
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", response.Code, response.Body.String())
+	}
+	if modelHandlerCalled {
+		t.Fatal("model handler was called for corrupt WebP input")
+	}
+	if !strings.Contains(response.Body.String(), "invalid image input: corrupt image data") {
+		t.Fatalf("expected actionable image validation error, got %s", response.Body.String())
+	}
+}
+
+func TestResponsesMiddlewareAcceptsWebPToolOutput(t *testing.T) {
+	const webp = "UklGRhwAAABXRUJQVlA4TA8AAAAvAAAAAAcQ/Y/+ByKi/wEA"
+	body := `{"model":"test-model","input":[{"type":"function_call","call_id":"call_1","name":"inspect","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_image","detail":"high","image_url":"data:image/webp;base64,` + webp + `"}]}]}`
+	modelHandlerCalled := false
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/v1/responses", ResponsesMiddleware(), func(c *gin.Context) {
+		modelHandlerCalled = true
+		var request api.ChatRequest
+		if err := json.NewDecoder(c.Request.Body).Decode(&request); err != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if len(request.Messages) != 2 || request.Messages[1].ToolCallID != "call_1" || len(request.Messages[1].Images) != 1 {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "invalid converted tool output"})
+			return
+		}
+		c.Status(http.StatusNoContent)
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("expected status 204, got %d: %s", response.Code, response.Body.String())
+	}
+	if !modelHandlerCalled {
+		t.Fatal("model handler was not called for valid WebP tool output")
+	}
+}

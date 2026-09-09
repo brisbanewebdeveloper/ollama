@@ -9,10 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/jpeg"
+	"image/png"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
+
+	"golang.org/x/image/webp"
 
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/types/model"
@@ -755,6 +759,7 @@ func decodeImageURL(url string) (api.ImageData, error) {
 	}
 
 	types := []string{"jpeg", "jpg", "png", "webp"}
+	declaredType := ""
 
 	// Support blank mime type to match /api/chat's behavior of taking just unadorned base64
 	if strings.HasPrefix(url, "data:;base64,") {
@@ -765,6 +770,7 @@ func decodeImageURL(url string) (api.ImageData, error) {
 			prefix := "data:image/" + t + ";base64,"
 			if strings.HasPrefix(url, prefix) {
 				url = strings.TrimPrefix(url, prefix)
+				declaredType = t
 				valid = true
 				break
 			}
@@ -778,7 +784,42 @@ func decodeImageURL(url string) (api.ImageData, error) {
 	if err != nil {
 		return nil, errors.New("invalid image input")
 	}
+	if err := validateImageData(img, declaredType); err != nil {
+		return nil, err
+	}
 	return img, nil
+}
+
+func validateImageData(data []byte, declaredType string) error {
+	actualType := http.DetectContentType(data)
+	if declaredType == "jpg" {
+		declaredType = "jpeg"
+	}
+
+	var err error
+	switch actualType {
+	case "image/jpeg":
+		if declaredType != "" && declaredType != "jpeg" {
+			return errors.New("invalid image input: declared MIME type does not match image data")
+		}
+		_, err = jpeg.Decode(bytes.NewReader(data))
+	case "image/png":
+		if declaredType != "" && declaredType != "png" {
+			return errors.New("invalid image input: declared MIME type does not match image data")
+		}
+		_, err = png.Decode(bytes.NewReader(data))
+	case "image/webp":
+		if declaredType != "" && declaredType != "webp" {
+			return errors.New("invalid image input: declared MIME type does not match image data")
+		}
+		_, err = webp.Decode(bytes.NewReader(data))
+	default:
+		return errors.New("invalid image input: unsupported or unrecognized image data")
+	}
+	if err != nil {
+		return errors.New("invalid image input: corrupt image data")
+	}
+	return nil
 }
 
 // FromCompletionToolCall converts OpenAI ToolCall format to api.ToolCall
