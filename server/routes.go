@@ -294,7 +294,7 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 		return
 	}
 
-	m, err := s.getModel(name.String())
+	m, err := GetModel(name.String())
 	if err != nil {
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
@@ -860,7 +860,7 @@ func (s *Server) EmbedHandler(c *gin.Context) {
 		return
 	}
 
-	m, err := s.getModel(name.String())
+	m, err := GetModel(name.String())
 	if err != nil {
 		handleScheduleError(c, req.Model, err)
 		return
@@ -1078,7 +1078,7 @@ func (s *Server) EmbeddingsHandler(c *gin.Context) {
 
 	name := modelRef.Name
 
-	m, err := s.getModel(name.String())
+	m, err := GetModel(name.String())
 	if err != nil {
 		handleScheduleError(c, req.Model, err)
 		return
@@ -1163,8 +1163,6 @@ func (s *Server) PullHandler(c *gin.Context) {
 			ch <- gin.H{"error": err.Error()}
 			return
 		}
-
-		s.refreshModelListCache(name)
 	}()
 
 	if req.Stream != nil && !*req.Stream {
@@ -1304,9 +1302,9 @@ func (s *Server) DeleteHandler(c *gin.Context) {
 		return
 	}
 
-	s.deleteModelListCache(n)
-
-	if err := m.RemoveLayers(); err != nil {
+	removed, err := m.RemoveLayers()
+	removeGGUFMetadata(removed...)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -1648,12 +1646,7 @@ func selectedModelTemplate(m *Model, kv ggml.KV) string {
 }
 
 func (s *Server) ListHandler(c *gin.Context) {
-	if s.modelCaches == nil || s.modelCaches.modelList == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "model list cache unavailable"})
-		return
-	}
-
-	models, err := s.modelCaches.modelList.List(c.Request.Context())
+	models, err := listModels(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -1698,8 +1691,6 @@ func (s *Server) CopyHandler(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("model %q not found", r.Source)})
 	} else if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-	} else {
-		s.refreshModelListCache(dst)
 	}
 }
 
@@ -2505,7 +2496,7 @@ func (s *Server) ChatHandler(c *gin.Context) {
 		return
 	}
 
-	m, err := s.getModel(name.String())
+	m, err := GetModel(name.String())
 	if err != nil {
 		switch {
 		case os.IsNotExist(err):
