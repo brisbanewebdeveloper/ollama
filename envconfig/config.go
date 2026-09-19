@@ -244,6 +244,8 @@ var (
 	PreModelLoadContentType = String("OLLAMA_PRE_MODEL_LOAD_CONTENT_TYPE")
 	// PreModelLoadBody is the HTTP request body to send before loading a model.
 	PreModelLoadBody = String("OLLAMA_PRE_MODEL_LOAD_BODY")
+	// CreateRemote forces model creation through the server API even when the server is local.
+	CreateRemote = Bool("OLLAMA_CREATE_REMOTE")
 )
 
 func String(s string) func() string {
@@ -346,6 +348,7 @@ func AsMap() map[string]EnvVar {
 		"OLLAMA_PRE_MODEL_LOAD_URL":          {"OLLAMA_PRE_MODEL_LOAD_URL", PreModelLoadURL(), "HTTP endpoint to call before loading a model"},
 		"OLLAMA_SCHED_SPREAD":                {"OLLAMA_SCHED_SPREAD", SchedSpread(), "Always schedule model across all GPUs"},
 		"OLLAMA_CONTEXT_LENGTH":              {"OLLAMA_CONTEXT_LENGTH", ContextLength(), "Context length to use unless otherwise specified (default: 4k/32k/256k based on VRAM)"},
+		"OLLAMA_CREATE_REMOTE":               {"OLLAMA_CREATE_REMOTE", CreateRemote(), "Force model creation through the server API even when the server is local"},
 		"OLLAMA_EDITOR":                      {"OLLAMA_EDITOR", Editor(), "Path to editor for interactive prompt editing (Ctrl+G)"},
 		"OLLAMA_REMOTES":                     {"OLLAMA_REMOTES", Remotes(), "Allowed hosts for remote models (default \"ollama.com\")"},
 
