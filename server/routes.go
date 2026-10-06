@@ -33,6 +33,7 @@ import (
 
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/auth"
+	"github.com/ollama/ollama/compatmigrate"
 	"github.com/ollama/ollama/decision"
 	"github.com/ollama/ollama/discover"
 	"github.com/ollama/ollama/envconfig"
@@ -219,30 +220,74 @@ func usesAutomaticNumBatch(model *Model, requestOpts map[string]any) bool {
 	return true
 }
 
+func normalizeRunner(runner string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(runner)) {
+	case "":
+		return "", nil
+	case manifest.RunnerMLX, "mlxrunner":
+		return manifest.RunnerMLX, nil
+	case manifest.RunnerGGML:
+		return manifest.RunnerGGML, nil
+	case manifest.RunnerLlamaCPP, "llama.cpp", "llama-cpp", "llama_cpp":
+		return manifest.RunnerLlamaCPP, nil
+	default:
+		return "", fmt.Errorf("unknown runner %q", runner)
+	}
+}
+
 // scheduleRunner schedules a runner after validating inputs such as capabilities and model options.
 // It returns the allocated runner, model instance, and consolidated options if successful and error otherwise.
-func (s *Server) scheduleRunner(ctx context.Context, model *Model, caps []model.Capability, requestOpts map[string]any, keepAlive *api.Duration, shift *bool) (llm.LlamaServer, *Model, *api.Options, error) {
-	if model == nil || model.Name == "" {
+func (s *Server) scheduleRunner(ctx context.Context, name, selectedRunner string, caps []model.Capability, requestOpts map[string]any, keepAlive *api.Duration, shift *bool) (llm.LlamaServer, *Model, *api.Options, error) {
+	if name == "" {
 		return nil, nil, nil, fmt.Errorf("model %w", errRequired)
 	}
 
-	if slices.Contains(model.Config.ModelFamilies, "mllama") && len(model.ProjectorPaths) > 0 {
+	parsedName := model.ParseName(name)
+	if parsedName.IsValid() {
+		existingName, err := getExistingName(parsedName)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		name = existingName.String()
+	}
+	model, err := GetModelForRunner(name, selectedRunner)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return s.scheduleRunnerForModel(ctx, model, caps, requestOpts, keepAlive, shift)
+}
+
+// scheduleRunnerForModel retains the request's resolved model, including its selected
+// manifest-list child, without repeating model lookup and metadata loading.
+func (s *Server) scheduleRunnerForModel(ctx context.Context, m *Model, caps []model.Capability, requestOpts map[string]any, keepAlive *api.Duration, shift *bool) (llm.LlamaServer, *Model, *api.Options, error) {
+	selectedName := model.ParseName(m.Name)
+	if !manifest.IsDigestReferenceName(selectedName) {
+		runner := m.Runner
+		if runner == "" && m.isGGUF() {
+			runner = manifest.RunnerGGML
+		}
+		if runner == manifest.RunnerGGML {
+			compatmigrate.StartLocalCompatibilityMigration(selectedName)
+		}
+	}
+
+	if slices.Contains(m.Config.ModelFamilies, "mllama") && len(m.ProjectorPaths) > 0 {
 		return nil, nil, nil, fmt.Errorf("'llama3.2-vision' is no longer compatible with your version of Ollama and has been replaced by a newer version. To re-download, run 'ollama pull llama3.2-vision'")
 	}
 
-	if err := model.CheckCapabilities(caps...); err != nil {
-		return nil, nil, nil, fmt.Errorf("%s %w", model.Name, err)
+	if err := m.CheckCapabilities(caps...); err != nil {
+		return nil, nil, nil, fmt.Errorf("%s %w", m.Name, err)
 	}
 
-	numCtxAuto := usesAutomaticNumCtx(model, requestOpts)
-	embeddingBatchDefault := shouldApplyEmbeddingBatchDefault(model, requestOpts)
-	numBatchAuto := usesAutomaticNumBatch(model, requestOpts) && !embeddingBatchDefault
-	opts, err := s.modelOptionsWithEmbeddingBatchDefault(model, requestOpts, embeddingBatchDefault)
+	numCtxAuto := usesAutomaticNumCtx(m, requestOpts)
+	embeddingBatchDefault := shouldApplyEmbeddingBatchDefault(m, requestOpts)
+	numBatchAuto := usesAutomaticNumBatch(m, requestOpts) && !embeddingBatchDefault
+	opts, err := s.modelOptionsWithEmbeddingBatchDefault(m, requestOpts, embeddingBatchDefault)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	runnerCh, errCh := s.sched.getRunner(ctx, model, opts, keepAlive, numCtxAuto, numBatchAuto, shift)
+	runnerCh, errCh := s.sched.getRunner(ctx, m, opts, keepAlive, numCtxAuto, numBatchAuto, shift)
 	var runner *runnerRef
 	select {
 	case runner = <-runnerCh:
@@ -250,7 +295,7 @@ func (s *Server) scheduleRunner(ctx context.Context, model *Model, caps []model.
 		return nil, nil, nil, err
 	}
 
-	return runner.llama, model, &opts, nil
+	return runner.llama, m, &opts, nil
 }
 
 func signinURL() (string, error) {
@@ -302,8 +347,16 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 		// TODO(drifkin): evaluate an `/api/*` passthrough for cloud where the
 		// original body (modulo model name normalization) is sent to cloud.
 		req.Model = modelRef.Base
+		req.Runner = ""
 		proxyCloudJSONRequest(c, req, cloudErrRemoteInferenceUnavailable)
 		return
+	}
+
+	if runner, err := normalizeRunner(req.Runner); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	} else {
+		req.Runner = runner
 	}
 
 	name := modelRef.Name
@@ -316,11 +369,13 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 		return
 	}
 
-	m, err := GetModel(name.String())
+	m, err := GetModelForRunner(name.String(), req.Runner)
 	if err != nil {
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("model '%s' not found", req.Model)})
+		case errors.Is(err, manifest.ErrNoCompatibleManifest):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		case err.Error() == errtypes.InvalidModelNameErrMsg:
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		default:
@@ -362,6 +417,7 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 		}
 
 		req.Model = m.Config.RemoteModel
+		req.Runner = ""
 
 		if req.Template == "" && m.Template.String() != "" {
 			req.Template = m.Template.String()
@@ -510,7 +566,7 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 		}
 	}
 
-	r, m, opts, err := s.scheduleRunner(c.Request.Context(), m, caps, req.Options, req.KeepAlive, req.Shift)
+	r, m, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), req.Runner, caps, req.Options, req.KeepAlive, req.Shift)
 	if errors.Is(err, errCapabilityCompletion) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%q does not support generate", req.Model)})
 		return
@@ -853,29 +909,45 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 func (s *Server) SystemOneHandler(c *gin.Context) {
 	// TODO(parthsareen): Check token limits before copying state and schema into
 	// each question's prompt. This byte cap limits memory use until then.
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 32<<20)
+	body, err := io.ReadAll(c.Request.Body)
 	var req decision.Request
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err == nil {
+		err = json.Unmarshal(body, &req)
+	}
+	if err != nil {
 		var sizeErr *http.MaxBytesError
 		if errors.As(err, &sizeErr) {
-			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body must not exceed 64 KiB"})
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body must not exceed 32 MiB"})
 			return
 		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	compiled, err := decision.Compile(req)
-	if err != nil {
+	textOnly := req
+	textOnly.Images = nil
+	var text bytes.Buffer
+	enc := json.NewEncoder(&text)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(textOnly); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(bytes.TrimSpace(text.Bytes())) > 64<<10 {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "text and schema must not exceed 64 KiB"})
 		return
 	}
 	ref, err := parseAndValidateModelRef(req.Model)
 	if err != nil {
+		if errors.Is(err, errModelRequired) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		writeModelRefParseError(c, err, http.StatusNotFound, fmt.Sprintf("model '%s' not found", req.Model))
 		return
 	}
 	if ref.Source == modelSourceCloud {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "System One requires a local Nimble or Tev model"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "System One requires a local decision model"})
 		return
 	}
 	name, err := getExistingName(ref.Name)
@@ -888,18 +960,27 @@ func (s *Server) SystemOneHandler(c *gin.Context) {
 		handleScheduleError(c, req.Model, err)
 		return
 	}
-	if !m.isGGUF() || m.Config.Renderer != "qwen3.5" && !(m.Config.Renderer == "" && m.Config.ModelFamily == "qwen35") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("model %q is not supported by System One; use a local Nimble or Tev GGUF model", req.Model)})
+	encoding := m.metadata.String("decision.type")
+	if encoding == "" && (m.Config.Renderer == "tev1" || m.Config.Renderer == "clef" || m.Config.Renderer == "strands") {
+		encoding = m.Config.Renderer
+	}
+	compiled, err := decision.Compile(req, encoding)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	r, _, _, err := s.scheduleRunner(c.Request.Context(), m, []model.Capability{model.CapabilityCompletion}, nil, req.KeepAlive, nil)
+	caps := []model.Capability{model.CapabilityDecision}
+	if len(req.Images) > 0 {
+		caps = append(caps, model.CapabilityVision)
+	}
+	r, _, _, err := s.scheduleRunnerForModel(c.Request.Context(), m, caps, nil, req.KeepAlive, nil)
 	if err != nil {
 		handleScheduleError(c, req.Model, err)
 		return
 	}
 	scorer, ok := r.(llm.Scorer)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("model %q does not support System One scoring; use a local Nimble or Tev model with a scoring-capable runner", req.Model)})
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("model %q does not support System One scoring; use a local decision model with a scoring-capable runner", req.Model)})
 		return
 	}
 	if err := compiled.Render(func(messages []api.Message) (string, error) {
@@ -956,8 +1037,16 @@ func (s *Server) EmbedHandler(c *gin.Context) {
 
 	if modelRef.Source == modelSourceCloud {
 		req.Model = modelRef.Base
+		req.Runner = ""
 		proxyCloudJSONRequest(c, req, cloudErrRemoteInferenceUnavailable)
 		return
+	}
+
+	if runner, err := normalizeRunner(req.Runner); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	} else {
+		req.Runner = runner
 	}
 
 	var input []string
@@ -988,13 +1077,7 @@ func (s *Server) EmbedHandler(c *gin.Context) {
 		return
 	}
 
-	m, err := GetModel(name.String())
-	if err != nil {
-		handleScheduleError(c, req.Model, err)
-		return
-	}
-
-	r, m, opts, err := s.scheduleRunner(c.Request.Context(), m, []model.Capability{}, req.Options, req.KeepAlive, nil)
+	r, m, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), req.Runner, []model.Capability{}, req.Options, req.KeepAlive, nil)
 	if err != nil {
 		handleScheduleError(c, req.Model, err)
 		return
@@ -1194,19 +1277,21 @@ func (s *Server) EmbeddingsHandler(c *gin.Context) {
 
 	if modelRef.Source == modelSourceCloud {
 		req.Model = modelRef.Base
+		req.Runner = ""
 		proxyCloudJSONRequest(c, req, cloudErrRemoteInferenceUnavailable)
 		return
 	}
 
-	name := modelRef.Name
-
-	m, err := GetModel(name.String())
-	if err != nil {
-		handleScheduleError(c, req.Model, err)
+	if runner, err := normalizeRunner(req.Runner); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	} else {
+		req.Runner = runner
 	}
 
-	r, m, _, err := s.scheduleRunner(c.Request.Context(), m, []model.Capability{}, req.Options, req.KeepAlive, nil)
+	name := modelRef.Name
+
+	r, m, _, err := s.scheduleRunner(c.Request.Context(), name.String(), req.Runner, []model.Capability{}, req.Options, req.KeepAlive, nil)
 	if err != nil {
 		handleScheduleError(c, req.Model, err)
 		return
@@ -1267,6 +1352,12 @@ func (s *Server) PullHandler(c *gin.Context) {
 		return
 	}
 
+	runner, err := normalizeRunner(req.Runner)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	ch := make(chan any)
 	go func() {
 		defer close(ch)
@@ -1281,9 +1372,13 @@ func (s *Server) PullHandler(c *gin.Context) {
 		ctx, cancel := context.WithCancel(c.Request.Context())
 		defer cancel()
 
-		if err := PullModel(ctx, name.DisplayShortest(), regOpts, fn); err != nil {
+		if err := PullModel(ctx, name.DisplayShortest(), runner, regOpts, fn); err != nil {
 			ch <- gin.H{"error": err.Error()}
 			return
+		}
+
+		if s.modelCaches != nil && s.modelCaches.show != nil {
+			s.modelCaches.show.invalidateLocal(name)
 		}
 	}()
 
@@ -1356,22 +1451,23 @@ func (s *Server) PushHandler(c *gin.Context) {
 // is.
 func getExistingName(n model.Name) (model.Name, error) {
 	var zero model.Name
+	if manifest.IsDigestReferenceName(n) {
+		return n, nil
+	}
+
+	// The usual request names an existing model. Avoid decoding every installed
+	// manifest just to resolve its spelling; partial matches below are for new names.
+	if name, err := manifest.FindName(n); err == nil {
+		return name, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return zero, err
+	}
+
 	existing, err := manifest.Manifests(true)
 	if err != nil {
 		return zero, err
 	}
-	// First pass: look for a full case-insensitive match across all four
-	// parts. If found, return the on-disk canonical name directly.
-	for e := range existing {
-		if strings.EqualFold(e.Host, n.Host) &&
-			strings.EqualFold(e.Namespace, n.Namespace) &&
-			strings.EqualFold(e.Model, n.Model) &&
-			strings.EqualFold(e.Tag, n.Tag) {
-			return e, nil
-		}
-	}
-
-	// Second pass: find the single manifest with the longest consecutive
+	// Find the single manifest with the longest consecutive
 	// case-insensitive prefix match (host -> namespace -> model) and copy
 	// only the matching prefix parts from that manifest. The tag is left
 	// as-is so that an unrelated manifest with a matching tag cannot
@@ -1422,7 +1518,7 @@ func (s *Server) DeleteHandler(c *gin.Context) {
 		return
 	}
 
-	modelRef, err := parseNormalizePullModelRef(cmp.Or(r.Model, r.Name))
+	modelRef, err := parseDeleteModelRef(cmp.Or(r.Model, r.Name))
 	if err != nil {
 		switch {
 		case errors.Is(err, errConflictingModelSource):
@@ -1441,7 +1537,7 @@ func (s *Server) DeleteHandler(c *gin.Context) {
 		return
 	}
 
-	m, err := manifest.ParseNamedManifest(n)
+	removed, err := manifest.RemoveNamed(n)
 	if err != nil {
 		switch {
 		case os.IsNotExist(err):
@@ -1451,18 +1547,7 @@ func (s *Server) DeleteHandler(c *gin.Context) {
 		}
 		return
 	}
-
-	if err := m.Remove(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	removed, err := m.RemoveLayers()
 	removeGGUFMetadata(removed...)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
 }
 
 func (s *Server) ShowHandler(c *gin.Context) {
@@ -1495,6 +1580,8 @@ func (s *Server) ShowHandler(c *gin.Context) {
 
 	if modelRef.Source == modelSourceCloud {
 		req.Model = modelRef.Base
+		req.Runner = ""
+		req.AllManifests = false
 		if modelShowCacheable(req) && s.modelCaches != nil && s.modelCaches.show != nil {
 			if disabled, _ := internalcloud.Status(); disabled {
 				c.JSON(http.StatusForbidden, gin.H{"error": internalcloud.DisabledError(cloudErrRemoteModelDetailsUnavailable)})
@@ -1514,6 +1601,15 @@ func (s *Server) ShowHandler(c *gin.Context) {
 		return
 	}
 
+	if req.Runner, err = normalizeRunner(req.Runner); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.AllManifests && req.Runner != "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "runner cannot be used with all_manifests"})
+		return
+	}
+
 	name := modelRef.Name
 	name, err = getExistingName(name)
 	if err != nil {
@@ -1523,23 +1619,24 @@ func (s *Server) ShowHandler(c *gin.Context) {
 	req.Model = name.DisplayShortest()
 
 	var resp *api.ShowResponse
+	if req.AllManifests {
+		resp, err := GetAllManifestsInfo(req)
+		if err != nil {
+			writeShowError(c, req.Model, err)
+			return
+		}
+
+		c.JSON(http.StatusOK, resp)
+		return
+	}
+
 	if modelShowCacheable(req) && s.modelCaches != nil && s.modelCaches.show != nil {
 		resp, err = s.modelCaches.show.GetLocal(req)
 	} else {
 		resp, err = GetModelInfo(req)
 	}
 	if err != nil {
-		var statusErr api.StatusError
-		switch {
-		case os.IsNotExist(err):
-			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("model '%s' not found", req.Model)})
-		case errors.As(err, &statusErr):
-			c.JSON(statusErr.StatusCode, gin.H{"error": statusErr.ErrorMessage})
-		case err.Error() == errtypes.InvalidModelNameErrMsg:
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		}
+		writeShowError(c, req.Model, err)
 		return
 	}
 
@@ -1562,16 +1659,25 @@ func (s *Server) ShowHandler(c *gin.Context) {
 }
 
 func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
+	runner, err := normalizeRunner(req.Runner)
+	if err != nil {
+		return nil, api.StatusError{
+			StatusCode:   http.StatusBadRequest,
+			ErrorMessage: err.Error(),
+		}
+	}
+	req.Runner = runner
+
 	name := model.ParseName(req.Model)
 	if !name.IsValid() {
 		return nil, model.Unqualified(name)
 	}
-	name, err := getExistingName(name)
+	name, err = getExistingName(name)
 	if err != nil {
 		return nil, err
 	}
 
-	m, err := GetModel(name.String())
+	m, err := GetModelForRunner(name.String(), req.Runner)
 	if err != nil {
 		return nil, err
 	}
@@ -1592,11 +1698,13 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 		Families:          m.Config.ModelFamilies,
 		ParameterSize:     m.Config.ModelType,
 		QuantizationLevel: m.Config.FileType,
+		Runner:            m.Runner,
 	}
 
-	// For safetensors LLM models, populate details from config.json.
-	if m.Config.ModelFormat == "safetensors" && slices.Contains(m.Config.Capabilities, "completion") {
-		if info, err := getSafetensorsLLMInfo(name); err == nil {
+	// For safetensors completion and decision models, populate details from config.json.
+	isSafetensorsLLM := m.IsMLX() && (slices.Contains(m.Config.Capabilities, "completion") || slices.Contains(m.Config.Capabilities, "decision"))
+	if isSafetensorsLLM {
+		if info, err := getSafetensorsLLMInfoForRunner(name, req.Runner); err == nil {
 			if arch, ok := info["general.architecture"].(string); ok && arch != "" {
 				modelDetails.Family = arch
 			}
@@ -1606,7 +1714,7 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 		}
 		// Older manifests may not have file_type populated for safetensors models.
 		if modelDetails.QuantizationLevel == "" {
-			if dtype, err := getSafetensorsDtype(name); err == nil && dtype != "" {
+			if dtype, err := getSafetensorsDtypeForRunner(name, req.Runner); err == nil && dtype != "" {
 				modelDetails.QuantizationLevel = dtype
 			}
 		}
@@ -1621,7 +1729,7 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 		msgs[i] = api.Message{Role: msg.Role, Content: msg.Content}
 	}
 
-	mf, err := manifest.ParseNamedManifest(name)
+	mf, err := manifest.ParseNamedManifestForRunner(name, req.Runner)
 	if err != nil {
 		return nil, err
 	}
@@ -1632,13 +1740,21 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 		Template:     m.Template.String(),
 		Details:      modelDetails,
 		Messages:     msgs,
-		Capabilities: m.Capabilities(),
-		Thinking:     m.Thinking(),
+		Capabilities: m.publicCapabilities(),
 		ModifiedAt:   mf.FileInfo().ModTime(),
 		Requires:     m.Config.Requires,
 		// Several integrations crash on a nil/omitempty+empty ModelInfo, so by
 		// default we return an empty map.
 		ModelInfo: make(map[string]any),
+	}
+	if !slices.Contains(resp.Capabilities, model.CapabilityDecision) {
+		resp.Thinking = m.Thinking()
+	}
+
+	if summaries, err := manifestSummariesForShow(name, mf.SelectedDigest()); err != nil {
+		return nil, err
+	} else {
+		resp.Manifests = summaries
 	}
 
 	if m.Config.RemoteHost != "" {
@@ -1709,14 +1825,14 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 		return resp, nil
 	}
 
-	// For safetensors LLM models, populate ModelInfo from config.json.
-	if m.Config.ModelFormat == "safetensors" && slices.Contains(m.Config.Capabilities, "completion") {
-		if info, err := getSafetensorsLLMInfo(name); err == nil {
+	// For safetensors completion and decision models, populate ModelInfo from config.json.
+	if isSafetensorsLLM {
+		if info, err := getSafetensorsLLMInfoForRunner(name, req.Runner); err == nil {
 			resp.ModelInfo = info
 		}
 		// Populate tensor info if verbose
 		if req.Verbose {
-			if tensors, err := getSafetensorsTensorInfo(name); err == nil {
+			if tensors, err := getSafetensorsTensorInfoForRunner(name, req.Runner); err == nil {
 				resp.Tensors = tensors
 			}
 		}
@@ -1729,7 +1845,7 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 	if slices.Contains(m.Capabilities(), model.CapabilityImage) {
 		// Populate tensor info if verbose
 		if req.Verbose {
-			if tensors, err := getSafetensorsTensorInfo(name); err == nil {
+			if tensors, err := getSafetensorsTensorInfoForRunner(name, req.Runner); err == nil {
 				resp.Tensors = tensors
 			}
 		}
@@ -1748,7 +1864,7 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 		}
 	}
 
-	modelInfo := kvData.Values()
+	modelInfo := jsonSafeValues(kvData)
 	delete(modelInfo, "general.name")
 	delete(modelInfo, "tokenizer.chat_template")
 	resp.ModelInfo = modelInfo
@@ -1770,7 +1886,7 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 		if err != nil {
 			return nil, err
 		}
-		projectorInfo := projectorData.Values()
+		projectorInfo := jsonSafeValues(projectorData)
 		resp.ProjectorInfo = projectorInfo
 	}
 
@@ -1823,12 +1939,17 @@ func (s *Server) CopyHandler(c *gin.Context) {
 		return
 	}
 
-	src := model.ParseName(r.Source)
-	if !src.IsValid() {
+	srcRef, err := parseAndValidateModelRef(r.Source)
+	if err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("source %q is invalid", r.Source)})
 		return
 	}
-	src, err := getExistingName(src)
+	if srcRef.Source == modelSourceCloud {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("source %q is invalid", r.Source)})
+		return
+	}
+	src := srcRef.Name
+	src, err = getExistingName(src)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -1845,10 +1966,16 @@ func (s *Server) CopyHandler(c *gin.Context) {
 		return
 	}
 
-	if err := CopyModel(src, dst); errors.Is(err, os.ErrNotExist) {
+	warning, err := CopyModel(src, dst)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
 		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("model %q not found", r.Source)})
-	} else if err != nil {
+	case errors.Is(err, manifest.ErrNoCompatibleManifest):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	case err != nil:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	default:
+		c.JSON(http.StatusOK, api.ProgressResponse{Status: cmp.Or(warning, "success")})
 	}
 }
 
@@ -2133,13 +2260,15 @@ func Serve(ln net.Listener) error {
 				return err
 			}
 
-			manifestsPath, err := manifest.Path()
-			if err != nil {
-				return err
-			}
+			for _, rootFn := range []func() (string, error){manifest.Path, manifest.V2Path} {
+				manifestsPath, err := rootFn()
+				if err != nil {
+					return err
+				}
 
-			if err := manifest.PruneDirectory(manifestsPath); err != nil {
-				return err
+				if err := manifest.PruneDirectory(manifestsPath); err != nil && !os.IsNotExist(err) {
+					return err
+				}
 			}
 		}
 	}
@@ -2438,6 +2567,22 @@ func (s *Server) PsHandler(c *gin.Context) {
 	for _, v := range s.sched.loadedModels() {
 		m := v.model
 		displayName := model.ParseName(m.ShortName).DisplayShortest()
+		digest := m.ManifestDigest
+		if digest == "" {
+			digest = m.Digest
+		}
+		runner := v.runner
+		if runner == "" {
+			runner = m.Runner
+		}
+		if runner == "" {
+			// Legacy manifests predate runner metadata; report the default
+			// the scheduler applies for the config's weight format.
+			runner, _ = manifest.MetadataForConfig(m.Config)
+		}
+		if normalized, err := normalizeRunner(runner); err == nil && normalized != "" {
+			runner = normalized
+		}
 		modelDetails := api.ModelDetails{
 			Format:            m.Config.ModelFormat,
 			Family:            m.Config.ModelFamily,
@@ -2446,16 +2591,19 @@ func (s *Server) PsHandler(c *gin.Context) {
 			QuantizationLevel: m.Config.FileType,
 		}
 
-		models = append(models, api.ProcessModelResponse{
+		mr := api.ProcessModelResponse{
 			Model:         displayName,
 			Name:          displayName,
 			Size:          v.size,
 			SizeVRAM:      v.sizeVRAM,
-			Digest:        m.Digest,
+			Digest:        digest,
 			Details:       modelDetails,
 			ExpiresAt:     v.expiresAt,
 			ContextLength: v.contextLength,
-		})
+			Runner:        runner,
+		}
+
+		models = append(models, mr)
 	}
 
 	slices.SortStableFunc(models, func(i, j api.ProcessModelResponse) int {
@@ -2650,12 +2798,20 @@ func (s *Server) ChatHandler(c *gin.Context) {
 
 	if modelRef.Source == modelSourceCloud {
 		req.Model = modelRef.Base
+		req.Runner = ""
 		if c.GetBool(cloudWebSearchOrchestrationKey) {
 			proxyCloudJSONRequestWithPath(c, req, "/api/chat", cloudErrRemoteInferenceUnavailable)
 			return
 		}
 		proxyCloudJSONRequest(c, req, cloudErrRemoteInferenceUnavailable)
 		return
+	}
+
+	if runner, err := normalizeRunner(req.Runner); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	} else {
+		req.Runner = runner
 	}
 
 	name := modelRef.Name
@@ -2666,11 +2822,13 @@ func (s *Server) ChatHandler(c *gin.Context) {
 		return
 	}
 
-	m, err := GetModel(name.String())
+	m, err := GetModelForRunner(name.String(), req.Runner)
 	if err != nil {
 		switch {
 		case os.IsNotExist(err):
 			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("model '%s' not found", req.Model)})
+		case errors.Is(err, manifest.ErrNoCompatibleManifest):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		case err.Error() == errtypes.InvalidModelNameErrMsg:
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		default:
@@ -2726,6 +2884,7 @@ func (s *Server) ChatHandler(c *gin.Context) {
 		}
 
 		req.Model = m.Config.RemoteModel
+		req.Runner = ""
 		if req.Options == nil {
 			req.Options = map[string]any{}
 		}
@@ -2832,7 +2991,7 @@ func (s *Server) ChatHandler(c *gin.Context) {
 		}
 	}
 
-	r, m, opts, err := s.scheduleRunner(c.Request.Context(), m, caps, req.Options, req.KeepAlive, req.Shift)
+	r, m, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), req.Runner, caps, req.Options, req.KeepAlive, req.Shift)
 	if errors.Is(err, errCapabilityCompletion) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%q does not support chat", req.Model)})
 		return
@@ -3233,6 +3392,8 @@ func countChatImages(msgs []api.Message) int {
 func handleScheduleError(c *gin.Context, name string, err error) {
 	switch {
 	case errors.Is(err, errCapabilities), errors.Is(err, errRequired):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	case errors.Is(err, manifest.ErrNoCompatibleManifest):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	case errors.Is(err, context.Canceled):
 		c.JSON(499, gin.H{"error": "request canceled"})

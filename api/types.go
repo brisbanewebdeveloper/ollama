@@ -64,6 +64,9 @@ type GenerateRequest struct {
 	// the library at https://ollama.com/library
 	Model string `json:"model"`
 
+	// Runner selects a runner variant from a manifest list.
+	Runner string `json:"runner,omitempty"`
+
 	// Prompt is the textual prompt to send to the model.
 	Prompt string `json:"prompt"`
 
@@ -133,6 +136,9 @@ type GenerateRequest struct {
 type ChatRequest struct {
 	// Model is the model name, as in [GenerateRequest].
 	Model string `json:"model"`
+
+	// Runner selects a runner variant from a manifest list.
+	Runner string `json:"runner,omitempty"`
 
 	// Messages is the messages of the chat - can be used to keep a chat memory.
 	Messages []Message `json:"messages"`
@@ -602,6 +608,9 @@ type EmbedRequest struct {
 	// Model is the model name.
 	Model string `json:"model"`
 
+	// Runner selects a runner variant from a manifest list.
+	Runner string `json:"runner,omitempty"`
+
 	// Input is the input to embed.
 	Input any `json:"input"`
 
@@ -633,6 +642,9 @@ type EmbedResponse struct {
 type EmbeddingRequest struct {
 	// Model is the model name.
 	Model string `json:"model"`
+
+	// Runner selects a runner variant from a manifest list.
+	Runner string `json:"runner,omitempty"`
 
 	// Prompt is the textual prompt to embed.
 	Prompt string `json:"prompt"`
@@ -666,6 +678,9 @@ type CreateRequest struct {
 
 	// From is the name of the model or file to use as the source.
 	From string `json:"from,omitempty"`
+
+	// List is the list of local model tags to include in a manifest list.
+	List []string `json:"list,omitempty"`
 
 	// RemoteHost is the URL of the upstream ollama API for the model (if any).
 	RemoteHost string `json:"remote_host,omitempty"`
@@ -705,6 +720,9 @@ type CreateRequest struct {
 	// Requires is the minimum version of Ollama required by the model.
 	Requires string `json:"requires,omitempty"`
 
+	// Capabilities adds to the model's inherited or inferred capabilities.
+	Capabilities []string `json:"capabilities,omitempty"`
+
 	// Info is a map of additional information for the model
 	Info map[string]any `json:"info,omitempty"`
 
@@ -724,8 +742,10 @@ type DeleteRequest struct {
 
 // ShowRequest is the request passed to [Client.Show].
 type ShowRequest struct {
-	Model  string `json:"model"`
-	System string `json:"system"`
+	Model        string `json:"model"`
+	Runner       string `json:"runner,omitempty"`
+	AllManifests bool   `json:"all_manifests,omitempty"`
+	System       string `json:"system"`
 
 	// Template is deprecated
 	Template string `json:"template"`
@@ -755,8 +775,29 @@ type ShowResponse struct {
 	ProjectorInfo map[string]any     `json:"projector_info,omitempty"`
 	Tensors       []Tensor           `json:"tensors,omitempty"`
 	Capabilities  []model.Capability `json:"capabilities,omitempty"`
+	Manifests     []ManifestSummary  `json:"manifests,omitempty"`
 	ModifiedAt    time.Time          `json:"modified_at,omitempty"`
 	Requires      string             `json:"requires,omitempty"`
+}
+
+// ManifestSummary describes one child manifest available through a model tag.
+type ManifestSummary struct {
+	Digest   string `json:"digest,omitempty"`
+	Runner   string `json:"runner,omitempty"`
+	Format   string `json:"format,omitempty"`
+	Selected bool   `json:"selected,omitempty"`
+}
+
+// ShowManifest is a single manifest summary returned from [Client.ShowManifests].
+type ShowManifest struct {
+	Runner string `json:"runner,omitempty"`
+	ShowResponse
+}
+
+// ShowManifestsResponse is the response returned from [Client.ShowManifests].
+type ShowManifestsResponse struct {
+	Manifests []ShowManifest `json:"manifests"`
+	License   string         `json:"license,omitempty"`
 }
 
 // CopyRequest is the request passed to [Client.Copy].
@@ -768,6 +809,7 @@ type CopyRequest struct {
 // PullRequest is the request passed to [Client.Pull].
 type PullRequest struct {
 	Model    string `json:"model"`
+	Runner   string `json:"runner,omitempty"`
 	Insecure bool   `json:"insecure,omitempty"` // Deprecated: ignored
 	Username string `json:"username"`           // Deprecated: ignored
 	Password string `json:"password"`           // Deprecated: ignored
@@ -862,6 +904,7 @@ type ProcessModelResponse struct {
 	ExpiresAt     time.Time    `json:"expires_at"`
 	SizeVRAM      int64        `json:"size_vram"`
 	ContextLength int          `json:"context_length"`
+	Runner        string       `json:"runner,omitempty"`
 }
 
 type TokenResponse struct {
@@ -960,6 +1003,10 @@ type ModelDetails struct {
 	QuantizationLevel string   `json:"quantization_level"`
 	ContextLength     int      `json:"context_length,omitempty"`
 	EmbeddingLength   int      `json:"embedding_length,omitempty"`
+
+	// Runner identifies which runner serves this model. Manifest-list models
+	// list one row per child manifest; Runner is what distinguishes them.
+	Runner string `json:"runner,omitempty"`
 }
 
 // UserResponse provides information about a user.
