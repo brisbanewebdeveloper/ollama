@@ -2767,6 +2767,7 @@ func NewCLI() *cobra.Command {
 	}
 
 	rootCmd.AddCommand(
+		newDrainCommand(),
 		serveCmd,
 		createCmd,
 		showCmd,

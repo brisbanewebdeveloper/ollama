@@ -55,6 +55,8 @@ type CodexDesktopConfig struct {
 	MaxBodyBytes       int64
 	Logger             *slog.Logger
 	Transport          http.RoundTripper
+	// LocalRequest attaches server-owned admission only to the local upstream.
+	LocalRequest func(*http.Request)
 }
 
 // CodexDesktop routes catalog-listed models to Ollama and other requests to
@@ -74,6 +76,7 @@ type CodexDesktop struct {
 	lastRoute          atomic.Value
 	activityLogMu      sync.Mutex
 	turnModels         turnModelCache
+	localRequest       func(*http.Request)
 }
 
 type routeSnapshot struct {
@@ -131,6 +134,7 @@ func NewCodexDesktop(config CodexDesktopConfig) (*CodexDesktop, error) {
 		activityLogPath:    strings.TrimSpace(config.ActivityLogPath),
 		maxBodyBytes:       maxBodyBytes,
 		logger:             logger,
+		localRequest:       config.LocalRequest,
 	}
 	handler.proxy = &httputil.ReverseProxy{
 		Rewrite:        handler.rewrite,
@@ -367,6 +371,9 @@ func (h *CodexDesktop) rewrite(pr *httputil.ProxyRequest) {
 		// Never forward Codex credentials to Ollama.
 		pr.Out.Header = make(http.Header)
 		copyOllamaRequestHeaders(pr.Out.Header, pr.In.Header)
+		if h.localRequest != nil {
+			h.localRequest(pr.Out)
+		}
 		return
 	}
 	if state.normalized {

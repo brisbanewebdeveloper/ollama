@@ -113,6 +113,7 @@ type Server struct {
 	defaultNumCtx int
 	requestLogger *inferenceRequestLogger
 	modelCaches   *modelCaches
+	drain         *drainGate
 }
 
 func init() {
@@ -2328,7 +2329,10 @@ func allowedHostsMiddleware(addr net.Addr) gin.HandlerFunc {
 }
 
 func (s *Server) GenerateRoutes() (http.Handler, error) {
-	codexDesktopProxy, err := newCodexDesktopProxy()
+	if s.drain == nil {
+		s.drain = &drainGate{}
+	}
+	codexDesktopProxy, err := newCodexDesktopProxy(s.drain.prepareLocalRequest)
 	if err != nil {
 		return nil, err
 	}
@@ -2426,7 +2430,7 @@ func (s *Server) GenerateRoutes() (http.Handler, error) {
 	// Inference (Anthropic compatibility)
 	r.POST("/v1/messages", s.withInferenceRequestLogging("/v1/messages", cloudPassthroughMiddleware(cloudErrRemoteInferenceUnavailable), middleware.AnthropicMessagesMiddleware(lookupThinking), s.ChatHandler)...)
 
-	return r, nil
+	return s.drain.wrap(r), nil
 }
 
 func (s *Server) ModelRecommendationsExperimentalHandler(c *gin.Context) {
@@ -2502,6 +2506,11 @@ func Serve(ln net.Listener) error {
 	if err != nil {
 		return err
 	}
+	closeAdmin, err := s.drain.startAdmin()
+	if err != nil {
+		return fmt.Errorf("start drain control: %w", err)
+	}
+	defer closeAdmin()
 
 	http.Handle("/", h)
 
