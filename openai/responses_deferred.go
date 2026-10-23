@@ -85,7 +85,10 @@ func appendAssistantToolCall(messages *[]api.Message, toolCall api.ToolCall, pen
 		lastMsg := &(*messages)[len(*messages)-1]
 		lastMsg.ToolCalls = append(lastMsg.ToolCalls, toolCall)
 		if *pendingThinking != "" {
-			lastMsg.Thinking = *pendingThinking
+			if lastMsg.Thinking != "" {
+				lastMsg.Thinking += "\n"
+			}
+			lastMsg.Thinking += *pendingThinking
 			*pendingThinking = ""
 		}
 		return
