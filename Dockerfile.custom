@@ -27,6 +27,19 @@ RUN yum install -y yum-utils epel-release \
 ENV CC=clang CXX=clang++
 
 FROM base-${TARGETARCH} AS base
+RUN set -eu; \
+    dnf upgrade -y ca-certificates; \
+    directory=/etc/pki/ca-trust/source/blocklist; \
+    if [ ! -d "$directory" ]; then directory=/etc/pki/ca-trust/source/blacklist; fi; \
+    for label in Comodo%20AAA%20Services%20root emSign%20ECC%20Root%20CA%20-%20G3; do \
+        uri="pkcs11:object=$label;type=cert"; \
+        records="$(trust list --filter="$uri")"; \
+        if [ -n "$records" ]; then \
+            trust extract --overwrite --format=pem-bundle --filter="$uri" "$directory/$label.pem"; \
+        fi; \
+    done; \
+    update-ca-trust; \
+    dnf clean all
 ARG CMAKEVERSION
 ARG NINJAVERSION
 RUN curl -fsSL https://github.com/Kitware/CMake/releases/download/v${CMAKEVERSION}/cmake-${CMAKEVERSION}-linux-$(uname -m).tar.gz | tar xz -C /usr/local --strip-components 1
@@ -254,6 +267,7 @@ COPY --from=build /bin/ollama /bin/ollama
 FROM ubuntu:24.04 AS runtime-base
 RUN apt-get update \
     && apt-get install -y ca-certificates libvulkan1 libopenblas0 \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge '20260816ubuntu0.24.04.1' \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
