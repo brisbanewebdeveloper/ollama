@@ -281,8 +281,8 @@ func Uint(key string, defaultValue uint) func() uint {
 }
 
 var (
-	// NumParallel sets the number of parallel model requests. NumParallel can be configured via the OLLAMA_NUM_PARALLEL environment variable.
-	NumParallel = Uint("OLLAMA_NUM_PARALLEL", 1)
+	// NumParallel sets the number of parallel model requests. Zero selects the backend default. NumParallel can be configured via the OLLAMA_NUM_PARALLEL environment variable.
+	NumParallel = Uint("OLLAMA_NUM_PARALLEL", 0)
 	// MaxRunners sets the maximum number of loaded models. MaxRunners can be configured via the OLLAMA_MAX_LOADED_MODELS environment variable.
 	MaxRunners = Uint("OLLAMA_MAX_LOADED_MODELS", 0)
 	// MaxQueue sets the maximum number of queued requests. MaxQueue can be configured via the OLLAMA_MAX_QUEUE environment variable.
@@ -340,7 +340,7 @@ func AsMap() map[string]EnvVar {
 		"OLLAMA_NO_CLOUD":                    {"OLLAMA_NO_CLOUD", NoCloud(), "Disable Ollama cloud features (remote inference and web search)"},
 		"OLLAMA_NOHISTORY":                   {"OLLAMA_NOHISTORY", NoHistory(), "Do not preserve readline history"},
 		"OLLAMA_NOPRUNE":                     {"OLLAMA_NOPRUNE", NoPrune(), "Do not prune model blobs on startup"},
-		"OLLAMA_NUM_PARALLEL":                {"OLLAMA_NUM_PARALLEL", NumParallel(), "Maximum number of parallel requests"},
+		"OLLAMA_NUM_PARALLEL":                {"OLLAMA_NUM_PARALLEL", NumParallel(), "Maximum number of parallel requests (0 selects the backend default)"},
 		"OLLAMA_ORIGINS":                     {"OLLAMA_ORIGINS", AllowedOrigins(), "A comma separated list of allowed origins"},
 		"OLLAMA_PRE_MODEL_LOAD_BODY":         {"OLLAMA_PRE_MODEL_LOAD_BODY", PreModelLoadBody(), "HTTP request body to send before loading a model"},
 		"OLLAMA_PRE_MODEL_LOAD_CONTENT_TYPE": {"OLLAMA_PRE_MODEL_LOAD_CONTENT_TYPE", PreModelLoadContentType(), "Content-Type header for the pre-model-load HTTP request"},
