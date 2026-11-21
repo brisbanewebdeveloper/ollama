@@ -119,6 +119,8 @@ func (s *Scheduler) loadedModelsForName(name model.Name, requestedRunner string)
 // on a large GPU can cause stalling
 var defaultModelsPerGPU = 3
 
+const preModelLoadTimeout = 2 * time.Second
+
 var ErrMaxQueue = errors.New("server busy, please try again.  maximum pending requests exceeded")
 
 func InitScheduler(ctx context.Context) *Scheduler {
@@ -144,6 +146,9 @@ func runPreModelLoadRequest(ctx context.Context) error {
 	if url == "" {
 		return nil
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, preModelLoadTimeout)
+	defer cancel()
 
 	method := strings.ToUpper(strings.TrimSpace(envconfig.PreModelLoadMethod()))
 	if method == "" {
@@ -352,10 +357,17 @@ func (s *Scheduler) processPending(ctx context.Context) {
 					runnerToExpire = s.findRunnerToUnload()
 				} else {
 					// Either no models are loaded or below envconfig.MaxRunners
-					if err := s.runPreModelLoad(ctx); err != nil {
-						slog.Info("pre-model-load request failed", "model", pending.model.ModelPath, "error", err)
+					hookErr := s.runPreModelLoad(ctx, pending.ctx)
+					if err := ctx.Err(); err != nil {
+						pending.errCh <- err
+						return
+					}
+					if err := pending.ctx.Err(); err != nil {
 						pending.errCh <- err
 						break
+					}
+					if hookErr != nil {
+						slog.Warn("pre-model-load hook failed, continuing with model load", "model", pending.model.ModelPath, "error", hookErr)
 					}
 
 					// Get a refreshed GPU list
@@ -455,10 +467,14 @@ func (s *Scheduler) processPending(ctx context.Context) {
 	}
 }
 
-func (s *Scheduler) runPreModelLoad(ctx context.Context) error {
+func (s *Scheduler) runPreModelLoad(schedulerCtx, requestCtx context.Context) error {
 	if s.preModelLoadFn == nil {
 		return nil
 	}
+	ctx, cancel := context.WithCancel(requestCtx)
+	defer cancel()
+	stop := context.AfterFunc(schedulerCtx, cancel)
+	defer stop()
 	return s.preModelLoadFn(ctx)
 }
 

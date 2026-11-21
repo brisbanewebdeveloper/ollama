@@ -426,10 +426,26 @@ func TestRunPreModelLoadRequest(t *testing.T) {
 
 		require.ErrorContains(t, runPreModelLoadRequest(ctx), "pre-model-load request failed")
 	})
+
+	t.Run("unresponsive endpoint", func(t *testing.T) {
+		release := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			<-release
+		}))
+		defer srv.Close()
+		defer close(release)
+
+		t.Setenv("OLLAMA_PRE_MODEL_LOAD_URL", srv.URL)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+
+		require.ErrorIs(t, runPreModelLoadRequest(ctx), context.DeadlineExceeded)
+		require.NoError(t, ctx.Err(), "the hook should time out before its caller")
+	})
 }
 
-func TestSchedPreModelLoadRequestFailureAbortsBeforeRefreshingGPUInfo(t *testing.T) {
-	ctx, done := context.WithTimeout(t.Context(), 500*time.Millisecond)
+func TestSchedContinuesLoadingAfterPreModelLoadRequestFailure(t *testing.T) {
+	ctx, done := context.WithTimeout(t.Context(), 5*time.Second)
 	defer done()
 
 	s := InitScheduler(ctx)
@@ -438,9 +454,10 @@ func TestSchedPreModelLoadRequestFailureAbortsBeforeRefreshingGPUInfo(t *testing
 	s.preModelLoadFn = func(ctx context.Context) error {
 		return errors.New("hook failed")
 	}
+	var gpuRefreshed atomic.Bool
 	s.getGpuFn = func(ctx context.Context, runners []ml.FilteredRunnerDiscovery) []ml.DeviceInfo {
-		t.Fatal("GPU discovery should not run after pre-model-load failure")
-		return nil
+		gpuRefreshed.Store(true)
+		return getGpuFn(ctx, runners)
 	}
 	s.getSystemInfoFn = getSystemInfoFn
 	s.newServerFn = scenario.newServer
@@ -450,9 +467,10 @@ func TestSchedPreModelLoadRequestFailureAbortsBeforeRefreshingGPUInfo(t *testing
 
 	select {
 	case err := <-scenario.req.errCh:
-		require.ErrorContains(t, err, "hook failed")
+		t.Fatal(err)
 	case resp := <-scenario.req.successCh:
-		t.Fatalf("unexpected success %v", resp)
+		require.Equal(t, scenario.srv, resp.llama)
+		require.True(t, gpuRefreshed.Load())
 	case <-ctx.Done():
 		t.Fatal("timeout")
 	}
